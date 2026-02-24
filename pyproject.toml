@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "marker-label"
+version = "0.1.0"
+description = "Label marker sets in motion capture C3D files using subject-specific static trials"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "c3d>=0.5",
+    "numpy>=1.20",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+qc = ["pyvista>=0.38"]
+dev = ["pytest>=7", "ruff>=0.1"]
+
+[project.scripts]
+marker-label = "marker_label.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/marker_label"]
+
+[tool.hatch.build.targets.sdist]
+packages = ["src/marker_label"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
