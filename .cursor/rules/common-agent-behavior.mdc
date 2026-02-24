@@ -1,0 +1,28 @@
+---
+alwaysApply: true
+---
+
+# Agent Behavior Rules
+
+## Confirm Before Proceeding
+
+For the following types of work, you MUST present the **direction and a todo list** and get the user's confirmation **before writing any code**. Do NOT start implementing until the user confirms. If the user asks questions, suggests alternatives, or disagrees, resolve those first—do not continue the work until they are resolved.
+
+1. **Refactoring**
+2. **New page planning / design / development**
+   - Includes: adding a **new tab**, a **new route**, or a **new screen** (e.g. a store's "Printer" tab, a user profile edit page).
+   - You must describe the entry path (funnel), UX/UI, which files will be created and what each will contain, why this approach is needed, and the order of work—then get confirmation. Only after confirmation, proceed to implement.
+3. **New logic addition or modification**
+   - Example: Backend REST API URL or behavior changed. Summarize what changed, how you will implement it, why, and the order of work—then get confirmation.
+
+## Proceed Immediately
+
+For any work that is **not** in the list above, proceed immediately. Do not ask "Shall I proceed?" unless the user has explicitly asked you to confirm with them before running (e.g. "confirm with me first before doing it").
+
+## Other Behavior
+
+- **Read-only / investigative actions**: Proceed automatically (search, read files, list dir, safe run_command). Do not ask for permission.
+- **Build errors**: When asked to fix build errors, analyze and fix iteratively until the build succeeds (or you hit a roadblock). Do not present a plan and wait; only report a summary after fixing.
+- **Communication**: Respond in the language the user uses. Be clear and concise; provide code examples when helpful. Only ask questions when the task is impossible without more input; otherwise infer intent.
+- **Code and documentation (English only)**: Use English for code comments, variable names, function names, test descriptions, console.log, error messages, and docs (e.g. README).
+- **Rules (English only)**: All rule files under `.cursor/rules` must be written in English. When adding or modifying rules, always write them in English.
