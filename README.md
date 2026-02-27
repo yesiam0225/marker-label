@@ -16,7 +16,7 @@ Label marker sets in motion capture C3D files using subject-specific static tria
 pip install -e .
 ```
 
-Dependencies: `c3d`, `numpy`, `scipy`.
+Dependencies: `c3d`, `numpy`, `scipy`. For the 3D QC viewer: `pip install -e ".[qc]"` (adds `pyvista`).
 
 ## Usage
 
@@ -73,6 +73,28 @@ report = run_quality_report("out/trial_01_labeled.csv")
 # report["visibility"], report["velocity_jumps"], report["obstacle_std"], etc.
 ```
 
+### 3D QC viewer
+
+View labeled C3D or CSV in 3D with **body segments** (sticks between markers) and playback. Segments are defined in `marker_label.segments.SEGMENTS` (Vicon-style: head, thorax, pelvis, arms, legs). Requires `[qc]`: `pip install -e ".[qc]"`.
+
+```bash
+marker-label-view path/to/trial_01_labeled.c3d
+# or
+marker-label-view path/to/trial_01_labeled.csv
+```
+
+Options: `--point-size` (default 12), `--speed` playback multiplier (default 1), `--background` (`white` or `black`), `--segment-color` (default `darkblue`).
+
+To add or change segments, edit `src/marker_label/segments.py`: each segment is an ordered list of marker names; consecutive pairs are drawn as lines (see docstring).
+
+From Python:
+
+```python
+from marker_label.qc_viewer import run_viewer, load_data
+
+run_viewer("trial_01_labeled.c3d", point_size=12, playback_speed=1, background="white")
+```
+
 ## Pipeline summary
 
 1. Load static (labeled) and dynamic (unlabeled) C3D.
@@ -82,6 +104,8 @@ report = run_quality_report("out/trial_01_labeled.csv")
 5. Match remaining markers to template; propagate labels temporally.
 6. Build full output: body labels (static order, NaN where missing) + OBSTACLE_L, OBSTACLE_R.
 7. Export original and filled C3D + CSV.
+
+For a detailed explanation of the logic and what to check when labeling fails, see [docs/MARKER_LABELING_LOGIC.md](docs/MARKER_LABELING_LOGIC.md).
 
 ## Pelvis markers
 
