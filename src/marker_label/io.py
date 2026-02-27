@@ -122,9 +122,10 @@ def save_c3d(
 
     with open(path, "wb") as f:
         writer = c3d.Writer()
-        for i in range(n_frames):
-            # add_frame expects (n_points, 5) per frame
-            writer.add_frame(out[i])
+        # c3d Writer.add_frames expects sequence of (point, analog) pairs per frame; use empty array for no analog
+        empty_analog = np.empty((0, 0))
+        frames_data = [(out[i], empty_analog) for i in range(n_frames)]
+        writer.add_frames(frames_data)
         # Copy point labels into writer's parameter block if supported
         _set_writer_point_labels(writer, labels, n_points)
         _set_writer_rate_first_frame(writer, rate, first_frame)
@@ -147,7 +148,7 @@ def _set_writer_rate_first_frame(writer, rate: float, first_frame: int) -> None:
     try:
         if hasattr(writer, "set_point_rate"):
             writer.set_point_rate(rate)
-        if hasattr(writer, "set_first_frame"):
-            writer.set_first_frame(first_frame)
+        if hasattr(writer, "set_start_frame"):
+            writer.set_start_frame(first_frame)
     except Exception:
         pass

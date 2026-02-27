@@ -49,7 +49,8 @@ def fill_gaps_1d(x: np.ndarray, max_interp_frames: int = 10) -> np.ndarray:
         end = i  # first valid after gap
         gap_len = end - start
         if start == 0:
-            out[:end] = out[end]
+            if end < n:
+                out[:end] = out[end]
             continue
         if end == n:
             out[start:] = out[start - 1]

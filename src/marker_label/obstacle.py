@@ -28,9 +28,13 @@ def motion_score_per_marker(points: np.ndarray) -> np.ndarray:
         valid = np.isfinite(points[i]).all(axis=1) & np.isfinite(points[i + 1]).all(axis=1)
         vel_mag = np.linalg.norm(d, axis=1)
         velocity[i] = np.where(valid, vel_mag, np.nan)
-    # Mean velocity (ignoring NaN)
+    # Mean velocity (ignoring NaN); avoid "Mean of empty slice" when a column has no finite values
+    mean_vel = np.full(n_points, np.nan)
     with np.errstate(invalid="ignore"):
-        mean_vel = np.nanmean(velocity, axis=0)
+        for j in range(n_points):
+            col = velocity[:, j]
+            if np.any(np.isfinite(col)):
+                mean_vel[j] = np.nanmean(col)
     return mean_vel
 
 
