@@ -47,6 +47,32 @@ run_pipeline(
 )
 ```
 
+### Quality inspection
+
+After labeling, check quality of the output CSV:
+
+```bash
+marker-label-inspect out/trial_01_labeled.csv
+```
+
+Options:
+- `--velocity-threshold MM`: Flag velocity jumps above this (mm). Default: 100.
+- `--visibility-warn FRAC`: Mark visibility below this as low. Default: 0.80.
+- `--max-jumps N`: Max number of velocity jumps to list. Default: 20.
+
+The report shows per-marker visibility, large frame-to-frame velocity jumps (possible swaps or bad assignment), and obstacle stationarity (should be near 0 mm).
+
+From Python:
+
+```python
+from marker_label.inspect_quality import run_quality_report, print_quality_report
+
+print_quality_report("out/trial_01_labeled.csv")
+# or
+report = run_quality_report("out/trial_01_labeled.csv")
+# report["visibility"], report["velocity_jumps"], report["obstacle_std"], etc.
+```
+
 ## Pipeline summary
 
 1. Load static (labeled) and dynamic (unlabeled) C3D.
