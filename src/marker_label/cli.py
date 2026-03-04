@@ -37,11 +37,85 @@ def main() -> None:
         metavar="N",
         help="Max gap length for spline interpolation (default: 10)",
     )
+    parser.add_argument(
+        "--static-facing",
+        type=str,
+        default=None,
+        metavar="AXIS",
+        choices=("x", "-x", "y", "-y"),
+        help="Lab axis subject faces in static (e.g. y). Use with --dynamic-facing when orientations differ.",
+    )
+    parser.add_argument(
+        "--dynamic-facing",
+        type=str,
+        default=None,
+        metavar="AXIS",
+        choices=("x", "-x", "y", "-y"),
+        help="Lab axis subject faces in dynamic (e.g. x). Rotates dynamic to align with static for matching.",
+    )
+    parser.add_argument(
+        "--static-unit",
+        type=str,
+        default="mm",
+        choices=("mm", "m"),
+        help="Unit of static C3D coordinates: mm or m (default mm). Use m if file is in meters; values are scaled to mm internally.",
+    )
+    parser.add_argument(
+        "--dynamic-unit",
+        type=str,
+        default="mm",
+        choices=("mm", "m"),
+        help="Unit of dynamic C3D coordinates: mm or m (default mm). Use m if file is in meters; values are scaled to mm internally.",
+    )
+    parser.add_argument(
+        "--max-match-distance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Reject initial assignment if point-template distance > MM mm (e.g. 300).",
+    )
+    parser.add_argument(
+        "--max-propagation-distance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Do not propagate label if nearest point is > MM mm (e.g. 150) to reduce swaps after dropout.",
+    )
+    parser.add_argument(
+        "--reference-report",
+        type=str,
+        default=None,
+        metavar="JSON",
+        help="Use reference analysis JSON (from marker-label-analyze -o) to set best-frame window and optional distance thresholds.",
+    )
     args = parser.parse_args()
     out_prefix = args.output
     if out_prefix is None:
         out_prefix = args.dynamic.rsplit(".", 1)[0] if "." in args.dynamic else args.dynamic
         out_prefix = f"{out_prefix}_labeled"
+
+    middle_start = 0.20
+    middle_end = 0.80
+    max_match_distance = args.max_match_distance
+    max_propagation_distance = args.max_propagation_distance
+
+    if args.reference_report:
+        import json
+        from .analyze_reference import suggested_pipeline_params_from_reference
+        with open(args.reference_report) as f:
+            ref_report = json.load(f)
+        ref_params = suggested_pipeline_params_from_reference(ref_report)
+        middle_start = ref_params["middle_start"]
+        middle_end = ref_params["middle_end"]
+        if max_match_distance is None and ref_params.get("max_match_distance") is not None:
+            max_match_distance = ref_params["max_match_distance"]
+        if max_propagation_distance is None and ref_params.get("max_propagation_distance") is not None:
+            max_propagation_distance = ref_params["max_propagation_distance"]
+
+    unit_scale = {"mm": 1.0, "m": 1000.0}
+    static_scale = unit_scale[args.static_unit]
+    dynamic_scale = unit_scale[args.dynamic_unit]
+
     try:
         from .pipeline import run_pipeline
         info = run_pipeline(
@@ -49,6 +123,14 @@ def main() -> None:
             args.dynamic,
             out_prefix,
             obstacle_visibility_min=args.obstacle_visibility,
+            static_facing_axis=args.static_facing,
+            dynamic_facing_axis=args.dynamic_facing,
+            static_scale=static_scale,
+            dynamic_scale=dynamic_scale,
+            middle_start=middle_start,
+            middle_end=middle_end,
+            max_match_distance=max_match_distance,
+            max_propagation_distance=max_propagation_distance,
             export_filled=not args.no_filled,
             max_interp_frames=args.max_interp_frames,
         )

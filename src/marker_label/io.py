@@ -30,14 +30,20 @@ def _points_to_xyz_residual(points: np.ndarray) -> tuple[np.ndarray, np.ndarray 
     return xyz, residual
 
 
-def load_c3d(path: str) -> dict:
+def load_c3d(path: str, scale_factor: float = 1.0) -> dict:
     """
     Load a C3D file into a dict with trajectories and metadata.
+
+    Parameters
+    ----------
+    path : path to C3D file
+    scale_factor : multiply point (and residual) coordinates by this after loading.
+        Use 1000.0 when the file is in meters and you want mm internally.
 
     Returns
     -------
     dict with keys:
-        points : (n_frames, n_points, 3) float, NaN where missing
+        points : (n_frames, n_points, 3) float, NaN where missing (in desired unit, e.g. mm)
         residual : (n_frames, n_points) float or None
         labels : list of str, length n_points (may be empty or generic)
         point_labels : same as labels (for compatibility)
@@ -69,6 +75,10 @@ def load_c3d(path: str) -> dict:
             pass
         if not labels and xyz.shape[1] > 0:
             labels = [f"Point_{i}" for i in range(xyz.shape[1])]
+        if scale_factor != 1.0:
+            xyz = xyz * scale_factor
+            if residual is not None:
+                residual = residual * scale_factor
         rate = getattr(reader, "point_rate", None) or 0.0
         first_frame = int(getattr(reader, "first_frame", 1))
         return {

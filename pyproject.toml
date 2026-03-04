@@ -22,6 +22,8 @@ dev = ["pytest>=7", "ruff>=0.1"]
 marker-label = "marker_label.cli:main"
 marker-label-inspect = "marker_label.inspect_quality:main"
 marker-label-view = "marker_label.qc_viewer:main"
+marker-label-compare = "marker_label.qc_viewer:main_compare"
+marker-label-analyze = "marker_label.analyze_reference:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marker_label"]

@@ -23,7 +23,8 @@ Dependencies: `c3d`, `numpy`, `scipy`. For the 3D QC viewer: `pip install -e ".[
 ### CLI
 
 ```bash
-marker-label path/to/static_labeled.c3d path/to/dynamic_unlabeled.c3d -o out/trial_01
+# Example: label BBA01 using its static (BBA01 Cal 01.c3d) and unlabeled dynamic (BBA01 Trial 05.c3d)
+marker-label "path/to/BBA01 Cal 01.c3d" "path/to/BBA01 Trial 05.c3d" -o out/BBA01_trial05
 ```
 
 Options:
@@ -31,6 +32,11 @@ Options:
 - `--no-filled`: Do not export filled C3D/CSV.
 - `--obstacle-visibility FRAC`: Min visibility for obstacle candidates (default 0.80).
 - `--max-interp-frames N`: Max gap length for spline interpolation (default 10).
+- `--static-facing AXIS`, `--dynamic-facing AXIS`: When static and dynamic were captured with the subject facing different lab axes (e.g. static facing **y**, dynamic facing **x**), use `--static-facing y --dynamic-facing x` so the pipeline rotates dynamic to align with static before matching. Values: `x`, `-x`, `y`, `-y`. Output coordinates remain in the original lab frame.
+- `--static-unit {mm,m}`, `--dynamic-unit {mm,m}`: Unit of the C3D coordinates (default `mm`). Use `m` if the file is in meters; coordinates are scaled to mm internally so static and dynamic match.
+- `--max-match-distance MM`: Reject initial assignment when point–template distance > MM mm (e.g. 300) to avoid bad matches.
+- `--max-propagation-distance MM`: Do not propagate a label to the nearest point if it is > MM mm away (e.g. 150) to reduce swaps after dropout or when markers cross.
+- `--reference-report JSON`: Use reference analysis (from `marker-label-analyze -o`) to set best-frame search window and optional distance thresholds. See [docs/REFERENCE_GUIDED_LABELING.md](docs/REFERENCE_GUIDED_LABELING.md).
 
 ### Python
 
@@ -42,6 +48,8 @@ run_pipeline(
     "dynamic_unlabeled.c3d",
     "out/trial_01",
     obstacle_visibility_min=0.80,
+    static_facing_axis="y",   # optional: subject facing y in static
+    dynamic_facing_axis="x",  # optional: subject facing x in dynamic
     export_filled=True,
     max_interp_frames=10,
 )
@@ -83,7 +91,7 @@ marker-label-view path/to/trial_01_labeled.c3d
 marker-label-view path/to/trial_01_labeled.csv
 ```
 
-Options: `--point-size` (default 12), `--speed` playback multiplier (default 1), `--background` (`white` or `black`), `--segment-color` (default `darkblue`).
+Options: `--point-size` (default 12), `--speed` playback multiplier (default 1), `--background` (`white` or `black`), `--segment-color` (default `darkblue`), `--scale FACTOR` (e.g. 1000 if the file is in meters so markers display at mm scale).
 
 To add or change segments, edit `src/marker_label/segments.py`: each segment is an ordered list of marker names; consecutive pairs are drawn as lines (see docstring).
 
@@ -94,6 +102,32 @@ from marker_label.qc_viewer import run_viewer, load_data
 
 run_viewer("trial_01_labeled.c3d", point_size=12, playback_speed=1, background="white")
 ```
+
+### Compare static vs dynamic (same scene)
+
+To see why labeling might fail, view the **static template** (green, labeled) and **dynamic trial** (red, one frame) in one 3D window. Use the slider to scrub through dynamic frames.
+
+```bash
+marker-label-compare path/to/static_labeled.c3d path/to/dynamic.c3d
+# optional: align orientations (same as pipeline)
+marker-label-compare path/to/static.c3d path/to/dynamic.c3d --static-facing y --dynamic-facing x
+```
+
+Options: `--frame N`, `--point-size`, `--background`, `--static-facing`, `--dynamic-facing`.
+
+### Reference-subject analysis (`marker-label-analyze`)
+
+Analyze a **manually labeled** static + dynamic pair from a reference subject to see how the static template relates to each dynamic frame (per-frame rigid transform, RMS, and which frame is “closest” to the template). Useful to tune pipeline behavior or inspect typical rotation/translation.
+
+**Input files:** You must provide the **paths** to two C3D files from one **reference subject**, both **manually labeled** with the same marker names (e.g. in Vicon Nexus). Example: reference subject **BBpilot01** — manually labeled static `BBpilot01 Cal 01.c3d`, manually labeled dynamic `BBpilot01 Trial 10.c3d`. (For the **subject you want to label**, e.g. BBA01, you use that subject’s labeled static and unlabeled dynamic with the main `marker-label` pipeline; the analyze tool is for a separate, reference subject.)
+
+```bash
+# Example: analyze reference subject BBpilot01 (manually labeled static + dynamic)
+marker-label-analyze "path/to/BBpilot01 Cal 01.c3d" "path/to/BBpilot01 Trial 10.c3d"
+marker-label-analyze "path/to/BBpilot01 Cal 01.c3d" "path/to/BBpilot01 Trial 10.c3d" --sample 10 -o report.json
+```
+
+Options: `--sample N` (analyze every Nth frame; default 1), `--pelvis-frame` (build template in pelvis frame), `--static-unit {mm,m}`, `--dynamic-unit {mm,m}` (default mm; use m if file is in meters), `-o report.json` (write full result as JSON).
 
 ## Pipeline summary
 

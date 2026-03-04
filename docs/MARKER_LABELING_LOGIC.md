@@ -24,6 +24,16 @@ This document explains how the pipeline assigns labels to unlabeled dynamic mark
 
 ---
 
+## Facing axis (static vs dynamic)
+
+If the **subject faces a different lab axis** in static vs dynamic (e.g. static facing **y**, dynamic facing **x**), template positions (from static) and dynamic positions are in different orientations. Lab-frame nearest-neighbor matching then fails (wrong or swapped labels).
+
+**Fix:** Use `--static-facing y --dynamic-facing x` (CLI) or `static_facing_axis="y", dynamic_facing_axis="x"` (Python). The pipeline rotates dynamic body points in the **xy plane** (around lab z) so that dynamic’s “forward” aligns with static’s, then runs matching. **Output coordinates are unchanged** (still in the original lab frame); only the internal copy used for matching is rotated.
+
+Values: `x`, `-x`, `y`, `-y` (direction the subject is facing in each trial).
+
+---
+
 ## Step 1: Obstacle detection (`obstacle.py`)
 
 **Goal:** Find the two markers that are on the obstacle (bar) so we can label them OBSTACLE_L / OBSTACLE_R and exclude them from body matching.
@@ -125,12 +135,38 @@ This document explains how the pipeline assigns labels to unlabeled dynamic mark
 
 | Symptom | Likely step | What to check |
 |--------|-------------|----------------|
+| Static facing y, dynamic facing x (or other mismatch) | 2–3. Template + matching | Use `--static-facing y --dynamic-facing x` so dynamic is rotated to align with static before matching. See “Facing axis” above. |
 | Obstacle bar is two body markers | 1. Obstacle detection | Visibility/motion: real obstacle should be very stationary and visible. Try `--obstacle-visibility`; inspect with `marker-label-inspect`. |
 | OBSTACLE_L/R swapped | 1. Obstacle detection | L/R by x only; adjust convention in code or swap in post. |
 | Body markers wrong from first frame | 2–3. Template + best-frame match | Static labels correct? Best frame in a “normal” pose? Try different middle range. |
 | Body markers swap in the middle of trial | 3c. Propagation | Cross or near-cross of two markers; consider gap-fill or different propagation (e.g. smooth trajectory). |
 | Some markers always NaN | 3. Matching or propagation | Template NaN for that label? Or never assigned at best frame? Or lost after long dropout? |
 | Wrong number of markers / wrong order | 4. Assemble | Static labels and obstacle detection output; compare to expected marker list. |
+
+---
+
+## Suggestions to improve labeling quality
+
+### Workflow and parameters
+
+1. **Use facing axes** when static and dynamic orientations differ: `--static-facing y --dynamic-facing x` (or your lab’s axes).
+2. **Inspect static C3D** in the 3D viewer; fix any wrong or swapped labels before running the pipeline.
+3. **Choose a better best frame:** Try `--middle-start 0.3 --middle-end 0.7` (or 0.25–0.75) so the chosen frame is in a “normal” pose with good visibility.
+4. **Obstacle:** If body markers are wrongly detected as obstacles, raise `--obstacle-visibility` (e.g. 0.9). If the real obstacle has low visibility, lower it slightly (e.g. 0.75).
+5. **Run inspection after labeling:** `marker-label-inspect out/trial_labeled.csv` to see visibility, velocity jumps (possible swaps), and obstacle stationarity.
+
+### Algorithm options (in code / pipeline)
+
+6. **Optimal assignment (Hungarian):** The pipeline can use a global assignment that minimizes total distance instead of greedy nearest-neighbor at the best frame, which reduces swaps when two markers are close. Enable with `use_hungarian=True` (default in `label_body_markers`).
+7. **Max match distance:** Reject initial assignments when point–template distance is above a threshold (e.g. 300 mm) so a bad template or outlier doesn’t steal a label. Use `max_match_distance=300` (or `None` to disable).
+8. **Max propagation distance:** During temporal propagation, do not assign a label to the nearest point if it is farther than a threshold (e.g. 150 mm per frame). This avoids wrong re-acquisition after long dropouts or when two markers cross. Use `max_propagation_distance=150` (or `None` to disable).
+9. **Pelvis frame (future):** Matching in a subject-relative (pelvis) frame would reduce sensitivity to global position; it would require estimating pelvis markers in the dynamic trial (e.g. iterative match or user input).
+
+### When quality is still poor
+
+- **Systematic L/R or anterior/posterior swaps:** Check static labels and facing axes; try a different middle range.
+- **Swaps in the middle of the trial:** Often due to two markers crossing or coming very close; propagation distance threshold can help; otherwise manual fix or gap-fill and re-label that segment.
+- **Many NaNs or wrong after long gaps:** Increase `max_propagation_distance` slightly so propagation is more tolerant of movement, or accept gaps and use filled export for analysis.
 
 ---
 
