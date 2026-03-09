@@ -36,10 +36,11 @@ def run_viewer(
     path: str,
     *,
     point_size: float = 12.0,
-    playback_speed: float = 1.0,
+    playback_speed: float = 1.5,
     background: str = "white",
     segment_color: str = "darkblue",
     scale_factor: float = 1.0,
+    label_font_size: float = 14.0,
 ) -> None:
     """
     Open PyVista window: 3D markers and body segments (sticks), play/stop/back/forward.
@@ -55,8 +56,9 @@ def run_viewer(
     background : 'white' or 'black'
     segment_color : color of segment lines (default 'darkblue')
     scale_factor : multiply coordinates by this (e.g. 1000 if file is in meters and you want to display as mm).
+    label_font_size : font size for marker labels (default 14).
     """
-    from .segments import segment_lines_for_frame_by_segment, SEGMENT_COLORS, SEGMENTS
+    from .segments import segment_lines_for_frame
 
     points, labels, rate = load_data(path, scale_factor=scale_factor)
     n_frames, n_markers, _ = points.shape
@@ -83,23 +85,11 @@ def run_viewer(
         cmap="coolwarm",
         show_scalar_bar=False,
     )
-    # Segment lines per segment (different color per segment)
-    def add_segment_meshes(pts: np.ndarray) -> None:
-        for seg_name, line_pts, line_cells in segment_lines_for_frame_by_segment(pts, labels):
-            if line_pts.size == 0:
-                continue
-            color = SEGMENT_COLORS.get(seg_name, segment_color)
-            mesh = pv.PolyData(line_pts, lines=line_cells)
-            plotter.add_mesh(mesh, color=color, line_width=2, name=f"segment_{seg_name}")
-
-    def remove_segment_meshes() -> None:
-        for seg_name in SEGMENTS:
-            try:
-                plotter.remove_actor(f"segment_{seg_name}")
-            except Exception:
-                pass
-
-    add_segment_meshes(points[0])
+    # Segment lines (single mesh, single color for performance)
+    line_pts, line_cells = segment_lines_for_frame(points[0], labels)
+    if line_pts.size > 0:
+        line_mesh = pv.PolyData(line_pts, lines=line_cells)
+        plotter.add_mesh(line_mesh, color=segment_color, line_width=2, name="segment_lines")
     # Obstacle labels: find OBSTACLE_L / OBSTACLE_R indices and show only those
     label_stripped = [str(lab).strip() for lab in labels]
     obstacle_indices = []
@@ -142,6 +132,38 @@ def run_viewer(
     add_obstacle_labels(0)
     plotter.add_text(f"Frame 0 / {n_frames}  (rate: {rate:.1f} Hz)", font_size=10, name="frame_text")
 
+    # Body point labels (marker names) — only at valid points
+    label_color = "black" if background == "white" else "white"
+    label_shape = "lightgrey" if background == "white" else "dimgrey"
+
+    def add_body_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("body_point_labels")
+        except Exception:
+            pass
+        valid = np.isfinite(points[f]).all(axis=1)
+        if not valid.any():
+            return
+        valid_pts = pts_display[f][valid]
+        valid_labels = [str(labels[i]).strip() for i in range(len(labels)) if valid[i]]
+        if not valid_pts.size or not valid_labels:
+            return
+        label_cloud = pv.PolyData(valid_pts)
+        label_cloud["names"] = np.array(valid_labels, dtype="U")
+        plotter.add_point_labels(
+            label_cloud,
+            "names",
+            font_size=int(label_font_size),
+            show_points=False,
+            text_color=label_color,
+            shape_color=label_shape,
+            shape_opacity=0.7,
+            always_visible=True,
+            name="body_point_labels",
+        )
+
+    add_body_labels(0)
+
     # Shared state: current frame index, playing flag, optional slider widget
     frame_idx = [0]
     playing = [False]
@@ -152,10 +174,17 @@ def run_viewer(
         frame_idx[0] = f
         cloud.points = pts_display[f]
         cloud["valid"] = np.isfinite(points[f]).all(axis=1).astype(np.float32)
-        # Update segment lines for this frame (per-segment colors)
-        remove_segment_meshes()
-        add_segment_meshes(points[f])
+        # Update segment lines for this frame
+        line_pts, line_cells = segment_lines_for_frame(points[f], labels)
+        try:
+            plotter.remove_actor("segment_lines")
+        except Exception:
+            pass
+        if line_pts.size > 0:
+            line_mesh = pv.PolyData(line_pts, lines=line_cells)
+            plotter.add_mesh(line_mesh, color=segment_color, line_width=2, name="segment_lines")
         add_obstacle_labels(f)
+        add_body_labels(f)
         plotter.add_text(f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)", font_size=10, name="frame_text")
         if slider_widget[0] is not None:
             try:
@@ -256,6 +285,116 @@ def run_viewer(
 
     plotter.add_timer_event(max_steps=10**9, duration=dt_ms, callback=on_timer)
     plotter.show()
+
+
+def export_video(
+    path: str,
+    output_path: str,
+    *,
+    framerate: float = 30.0,
+    point_size: float = 12.0,
+    background: str = "white",
+    segment_color: str = "darkblue",
+    scale_factor: float = 1.0,
+    label_font_size: float = 14.0,
+    quality: int = 5,
+) -> None:
+    """
+    Export labeled C3D/CSV as MP4 video (off-screen render). Requires imageio/ffmpeg.
+    """
+    from .segments import segment_lines_for_frame
+
+    points, labels, rate = load_data(path, scale_factor=scale_factor)
+    n_frames, n_markers, _ = points.shape
+    if n_frames == 0 or n_markers == 0:
+        raise ValueError("No data to export.")
+    pts_display = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+
+    label_stripped = [str(lab).strip() for lab in labels]
+    obstacle_indices = []
+    obstacle_names = []
+    for name in ("OBSTACLE_L", "OBSTACLE_R"):
+        try:
+            i = label_stripped.index(name)
+            obstacle_indices.append(i)
+            obstacle_names.append(name)
+        except ValueError:
+            pass
+    obs_text_color = "black" if background == "white" else "white"
+    obs_shape_color = "lightgrey" if background == "white" else "dimgrey"
+    label_color = "black" if background == "white" else "white"
+    label_shape = "lightgrey" if background == "white" else "dimgrey"
+
+    plotter = pv.Plotter(off_screen=True)
+    plotter.set_background(background)
+    cloud = pv.PolyData(pts_display[0])
+    cloud["valid"] = np.isfinite(points[0]).all(axis=1).astype(np.float32)
+    plotter.add_mesh(
+        cloud,
+        render_points_as_spheres=True,
+        point_size=point_size,
+        scalars="valid",
+        cmap="coolwarm",
+        show_scalar_bar=False,
+    )
+    line_pts, line_cells = segment_lines_for_frame(points[0], labels)
+    if line_pts.size > 0:
+        line_mesh = pv.PolyData(line_pts, lines=line_cells)
+        plotter.add_mesh(line_mesh, color=segment_color, line_width=2, name="segment_lines")
+    plotter.add_text(f"Frame 0 / {n_frames}", font_size=10, name="frame_text")
+
+    def update_frame(f: int) -> None:
+        cloud.points = pts_display[f]
+        cloud["valid"] = np.isfinite(points[f]).all(axis=1).astype(np.float32)
+        line_pts, line_cells = segment_lines_for_frame(points[f], labels)
+        try:
+            plotter.remove_actor("segment_lines")
+        except Exception:
+            pass
+        if line_pts.size > 0:
+            line_mesh = pv.PolyData(line_pts, lines=line_cells)
+            plotter.add_mesh(line_mesh, color=segment_color, line_width=2, name="segment_lines")
+        try:
+            plotter.remove_actor("obstacle_labels")
+        except Exception:
+            pass
+        if obstacle_indices:
+            obs_pts = pts_display[f][obstacle_indices]
+            obs_cloud = pv.PolyData(obs_pts)
+            obs_cloud["names"] = np.array(obstacle_names, dtype="U")
+            plotter.add_point_labels(
+                obs_cloud, "names", font_size=10, show_points=False,
+                text_color=obs_text_color, shape_color=obs_shape_color,
+                shape_opacity=0.85, always_visible=True, name="obstacle_labels",
+            )
+        try:
+            plotter.remove_actor("body_point_labels")
+        except Exception:
+            pass
+        valid = np.isfinite(points[f]).all(axis=1)
+        if valid.any():
+            valid_pts = pts_display[f][valid]
+            valid_labels = [str(labels[i]).strip() for i in range(len(labels)) if valid[i]]
+            if valid_pts.size and valid_labels:
+                label_cloud = pv.PolyData(valid_pts)
+                label_cloud["names"] = np.array(valid_labels, dtype="U")
+                plotter.add_point_labels(
+                    label_cloud, "names", font_size=int(label_font_size),
+                    show_points=False, text_color=label_color, shape_color=label_shape,
+                    shape_opacity=0.7, always_visible=True, name="body_point_labels",
+                )
+        try:
+            plotter.remove_actor("frame_text")
+        except Exception:
+            pass
+        plotter.add_text(f"Frame {f} / {n_frames}", font_size=10, name="frame_text")
+
+    plotter.open_movie(output_path, framerate=framerate, quality=quality)
+    for f in range(n_frames):
+        update_frame(f)
+        plotter.write_frame()
+    plotter.close()
+    print(f"Exported {n_frames} frames to {output_path}")
 
 
 def run_compare_viewer(
@@ -370,19 +509,35 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="3D viewer for labeled C3D/CSV with segments (PyVista).")
     parser.add_argument("file", help="Labeled .c3d or labeled .csv file")
     parser.add_argument("--point-size", type=float, default=12.0, help="Marker size (default 12)")
-    parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier (default 1)")
+    parser.add_argument("--speed", type=float, default=1.5, metavar="X", help="Playback speed multiplier (default 1.5; use 2 for 2x, 0.5 for half)")
     parser.add_argument("--background", choices=("white", "black"), default="white", help="Background color")
     parser.add_argument("--segment-color", default="darkblue", help="Color of segment lines (default darkblue)")
     parser.add_argument("--scale", type=float, default=1.0, metavar="FACTOR", help="Multiply coordinates by FACTOR (e.g. 1000 if file is in meters; default 1)")
+    parser.add_argument("--label-size", type=float, default=14.0, metavar="SIZE", help="Font size for marker labels (default 14)")
+    parser.add_argument("--export-video", metavar="OUTPUT.mp4", default=None, help="Export playback to MP4 file (no window)")
+    parser.add_argument("--framerate", type=float, default=30.0, help="Video framerate when using --export-video (default 30)")
     args = parser.parse_args()
-    run_viewer(
-        args.file,
-        point_size=args.point_size,
-        playback_speed=args.speed,
-        background=args.background,
-        segment_color=args.segment_color,
-        scale_factor=args.scale,
-    )
+    if args.export_video:
+        export_video(
+            args.file,
+            args.export_video,
+            point_size=args.point_size,
+            background=args.background,
+            segment_color=args.segment_color,
+            scale_factor=args.scale,
+            label_font_size=args.label_size,
+            framerate=args.framerate,
+        )
+    else:
+        run_viewer(
+            args.file,
+            point_size=args.point_size,
+            playback_speed=args.speed,
+            background=args.background,
+            segment_color=args.segment_color,
+            scale_factor=args.scale,
+            label_font_size=args.label_size,
+        )
 
 
 def main_compare() -> None:

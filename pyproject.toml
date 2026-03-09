@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-qc = ["pyvista>=0.38"]
+qc = ["pyvista>=0.38", "imageio[ffmpeg]>=2.9"]
 dev = ["pytest>=7", "ruff>=0.1"]
 
 [project.scripts]

@@ -82,6 +82,66 @@ def main() -> None:
         help="Do not propagate label if nearest point is > MM mm (e.g. 150) to reduce swaps after dropout.",
     )
     parser.add_argument(
+        "--whole-body-39",
+        action="store_true",
+        help="Use 39 whole-body markers only; anchor-based best frame and tiered distance caps (alpha*s).",
+    )
+    parser.add_argument(
+        "--z-band-by-value",
+        action="store_true",
+        help="Define Z-bands by equal Z span (template min–max).",
+    )
+    parser.add_argument(
+        "--z-band-by-gap",
+        action="store_true",
+        help="Define Z-band boundaries at largest Z gaps between consecutive markers (by difference).",
+    )
+    parser.add_argument(
+        "--z-band-by-rank",
+        action="store_true",
+        help="Assign bands by Z rank in dynamic frame (highest Z → band 11, etc.); do not use static trial Z.",
+    )
+    parser.add_argument(
+        "--match-head-first",
+        action="store_true",
+        help="Match head first, then RSHO/LSHO/C7 by midline (forward walking along X: L/R from Y, A/P from X).",
+    )
+    parser.add_argument(
+        "--walking-axis-y",
+        action="store_true",
+        help="Forward walking is along Y-axis (L/R from X, A/P from Y). Default is X-axis.",
+    )
+    parser.add_argument(
+        "--left-side-positive-y",
+        action="store_true",
+        help="Left side of body = positive Y in dynamic trial. Use if head or shoulder L/R are flipped (e.g. LFHD on right, RFHD on left).",
+    )
+    parser.add_argument(
+        "--head-flip-lr",
+        action="store_true",
+        help="Flip head L/R only (LFHD↔RFHD, LBHD↔RBHD). Use when shoulders are correct but head markers are swapped.",
+    )
+    parser.add_argument(
+        "--head-anterior-smaller-x",
+        action="store_true",
+        help="Head anterior (front) = smaller X. Use when LFHD and RBHD are swapped (front of head has smaller X in trial).",
+    )
+    parser.add_argument(
+        "--head-anterior-larger-x",
+        action="store_true",
+        help="Force head anterior = larger X (overrides walking direction). Use when subject walks +X but LFHD/RBHD are still swapped (computed walking direction may be wrong).",
+    )
+    parser.add_argument(
+        "--head-swap-lfhd-rbhd",
+        action="store_true",
+        help="After head assignment, swap LFHD and RBHD labels only (fixes diagonal swap when other 4-head labels are correct).",
+    )
+    parser.add_argument(
+        "--head-align-to-shoulders",
+        action="store_true",
+        help="Align head L/R to shoulders (flip head if LFHD is on opposite side from LSHO). Default: L/R from walking direction only, no flip.",
+    )
+    parser.add_argument(
         "--reference-report",
         type=str,
         default=None,
@@ -123,6 +183,18 @@ def main() -> None:
             args.dynamic,
             out_prefix,
             obstacle_visibility_min=args.obstacle_visibility,
+            use_whole_body_39=args.whole_body_39,
+            z_band_by_value=args.z_band_by_value,
+            z_band_by_gap=args.z_band_by_gap,
+            z_band_by_rank=args.z_band_by_rank,
+            match_head_first=args.match_head_first,
+            walking_axis_x=not args.walking_axis_y,
+            left_side_positive_lr=args.left_side_positive_y,
+            head_flip_lr=args.head_flip_lr,
+            head_anterior_smaller_x=args.head_anterior_smaller_x,
+            head_anterior_larger_x=args.head_anterior_larger_x,
+            head_swap_lfhd_rbhd=args.head_swap_lfhd_rbhd,
+            head_align_to_shoulders=args.head_align_to_shoulders,
             static_facing_axis=args.static_facing,
             dynamic_facing_axis=args.dynamic_facing,
             static_scale=static_scale,

@@ -6,9 +6,19 @@ import math
 import numpy as np
 
 from .io import load_c3d
-from .constants import PELVIS_MARKERS, DEFAULT_OBSTACLE_VISIBILITY_MIN
+from .constants import (
+    DEFAULT_DYNAMIC_VISIBILITY_MIN,
+    PELVIS_MARKERS,
+    DEFAULT_OBSTACLE_VISIBILITY_MIN,
+    WHOLE_BODY_39,
+)
 from .obstacle import detect_obstacle_markers
-from .body_labeling import build_template_from_static, label_body_markers
+from .body_labeling import (
+    build_template_from_static,
+    label_body_markers,
+    compute_walking_direction_x,
+    get_lr_ap_axes_from_walking,
+)
 from .export import build_full_trajectory_matrix, export_labeled
 
 # Facing axis: subject's forward direction in lab (z = up). Used to align dynamic to static.
@@ -62,6 +72,7 @@ def run_pipeline(
     *,
     obstacle_visibility_min: float = DEFAULT_OBSTACLE_VISIBILITY_MIN,
     use_pelvis_frame: bool = False,
+    use_whole_body_39: bool = False,
     static_facing_axis: str | None = None,
     dynamic_facing_axis: str | None = None,
     static_scale: float = 1.0,
@@ -73,6 +84,17 @@ def run_pipeline(
     max_propagation_distance: float | None = None,
     export_filled: bool = True,
     max_interp_frames: int = 10,
+    z_band_by_value: bool = False,
+    z_band_by_gap: bool = False,
+    z_band_by_rank: bool = False,
+    match_head_first: bool = False,
+    walking_axis_x: bool = True,
+    left_side_positive_lr: bool = False,
+    head_flip_lr: bool = False,
+    head_anterior_smaller_x: bool = False,
+    head_anterior_larger_x: bool = False,
+    head_swap_lfhd_rbhd: bool = False,
+    head_align_to_shoulders: bool = False,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -95,6 +117,18 @@ def run_pipeline(
     max_propagation_distance : do not propagate if nearest point > this mm per frame (optional)
     export_filled : also export filled C3D/CSV
     max_interp_frames : gap-fill threshold
+    use_whole_body_39 : if True, restrict to 39 whole-body markers and use anchor-based best frame + tiered caps
+    z_band_by_value : if True, Z-bands by equal Z span (min–max template).
+    z_band_by_gap : if True, Z-band boundaries at largest Z gaps between consecutive markers (default False).
+    z_band_by_rank : if True, assign bands by Z rank in dynamic frame (highest Z → band 11, etc.); no static Z.
+    match_head_first : if True, match head then RSHO/LSHO/C7 by midline, then rest by Z-band.
+    walking_axis_x : if True (default), forward walking is along X-axis: L/R from Y, A/P from X.
+    left_side_positive_lr : if True, left side of body = positive L/R axis (e.g. dynamic left = positive Y).
+    head_flip_lr : if True, flip head L/R when assigning LFHD/RFHD/LBHD/RBHD (use when shoulders are correct but head L/R are swapped).
+    head_anterior_smaller_x : if True, head anterior (front) = smaller X. Use when LFHD/RBHD are swapped because front of head has smaller X.
+    head_anterior_larger_x : if True, force larger X = anterior for head. Use when subject walks +X but computed walking direction is wrong (LFHD/RBHD swapped).
+    head_swap_lfhd_rbhd : if True, after head assignment swap LFHD and RBHD labels only (fixes diagonal swap).
+    head_align_to_shoulders : if False (default), L/R is from walking direction only; no flip. If True, after C7+shoulders, flip head L/R so LFHD is on same side as LSHO.
 
     Returns
     -------
@@ -108,6 +142,15 @@ def run_pipeline(
     residual_d = dynamic.get("residual")
     rate = dynamic.get("rate") or 0.0
     first_frame = dynamic.get("first_frame") or 1
+
+    # 0) Drop markers not visible more than 50% of the trial
+    n_frames_d, n_pts_d, _ = points_d.shape
+    visible_frac = np.sum(np.isfinite(points_d).all(axis=2), axis=0) / n_frames_d
+    keep_vis = np.where(visible_frac > DEFAULT_DYNAMIC_VISIBILITY_MIN)[0]
+    if len(keep_vis) < n_pts_d:
+        points_d = points_d[:, keep_vis, :]
+        if residual_d is not None:
+            residual_d = residual_d[:, keep_vis]
 
     # 1) Obstacle detection on dynamic
     obstacle_indices, obstacle_labels = detect_obstacle_markers(
@@ -132,22 +175,54 @@ def run_pipeline(
         points_d_body = points_d
         residual_d_body = residual_d
 
-    # 2) Template from static (exclude obstacle labels if present)
-    body_labels_static = [l for l in labels_s if l not in ("OBSTACLE_L", "OBSTACLE_R")]
+    # 2) Template from static (exclude obstacle and markers starting with *)
+    body_labels_static = [
+        l for l in labels_s
+        if l not in ("OBSTACLE_L", "OBSTACLE_R") and not (l.strip().startswith("*"))
+    ]
+    # Restrict to 39 whole-body markers for the entire labeling process (*39, *40, etc. excluded)
+    whole_set = {m.upper() for m in WHOLE_BODY_39}
+    body_labels_static = [l for l in body_labels_static if l.strip().upper() in whole_set]
+    if use_whole_body_39:
+        pass  # already filtered to WHOLE_BODY_39 above
     if not body_labels_static:
         body_labels_static = list(labels_s)
+    body_labels_static = [l for l in body_labels_static if l.strip().upper() in whole_set]
+    keep_static = [i for i in range(len(labels_s)) if labels_s[i] in body_labels_static]
+    points_s_body = points_s[:, keep_static, :] if keep_static else points_s
+    labels_s_body = [labels_s[i] for i in keep_static] if keep_static else labels_s
     template, _origin, _R = build_template_from_static(
-        points_s, labels_s, use_pelvis_frame=use_pelvis_frame
+        points_s_body, labels_s_body, use_pelvis_frame=use_pelvis_frame
     )
-    # Filter template to body only
     template_body = {k: v for k, v in template.items() if k in body_labels_static}
 
     # Align dynamic to static orientation when facing axes differ (e.g. static=y, dynamic=x)
     points_d_body_for_matching = points_d_body
+    R_facing = None
     if static_facing_axis and dynamic_facing_axis:
         R = rotation_for_facing_axes(static_facing_axis, dynamic_facing_axis)
         if R is not None:
+            R_facing = R
             points_d_body_for_matching = points_d_body @ R.T  # (n_frames, n_pts, 3)
+
+    # Plan 1: Set L/R and A/P from walking direction *before* any labeling (used for rest of pipeline).
+    # Use full dynamic points for walking direction so the centroid X trend is stable (same as report script).
+    # When facing rotation is applied, rotate d_back and d_right into the matching frame so head A/P and L/R
+    # use the same coordinate system as the points (rule-based; avoids LFHD/RBHD swap from frame mismatch).
+    lr_ap_from_walking = None
+    if walking_axis_x:
+        wdx = compute_walking_direction_x(points_d)
+        d_back, d_right = get_lr_ap_axes_from_walking(
+            wdx, left_side_positive_lr=left_side_positive_lr
+        )
+        centroid_xy = np.nanmean(
+            np.nanmean(points_d_body_for_matching[:, :, :2], axis=1), axis=0
+        ).astype(np.float64)
+        if R_facing is not None:
+            R_2d = R_facing[:2, :2].astype(np.float64)
+            d_back = (R_2d @ d_back).astype(np.float64)
+            d_right = (R_2d @ d_right).astype(np.float64)
+        lr_ap_from_walking = (d_back, d_right, centroid_xy)
 
     # 3) Body labeling (use rotated points for matching; output keeps original coords)
     labels_body_out, label_per_frame = label_body_markers(
@@ -159,6 +234,19 @@ def run_pipeline(
         use_hungarian=use_hungarian,
         max_match_distance=max_match_distance,
         max_propagation_distance=max_propagation_distance,
+        use_whole_body_39=use_whole_body_39,
+        z_band_by_value=z_band_by_value,
+        z_band_by_gap=z_band_by_gap,
+        z_band_by_rank=z_band_by_rank,
+        match_head_first=match_head_first,
+        walking_axis_x=walking_axis_x,
+        left_side_positive_lr=left_side_positive_lr,
+        head_flip_lr=head_flip_lr,
+        head_anterior_smaller_x=head_anterior_smaller_x,
+        head_anterior_larger_x=head_anterior_larger_x,
+        head_swap_lfhd_rbhd=head_swap_lfhd_rbhd,
+        head_align_to_shoulders=head_align_to_shoulders,
+        lr_ap_from_walking=lr_ap_from_walking,
     )
 
     # 4) Build full output: body (static order) + obstacle
