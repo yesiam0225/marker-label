@@ -91,6 +91,23 @@ CLAV_RBAK_Y_OFFSET_MM = 15  # Allow Y in [min(LSHO_y, RSHO_y) - 15, max(...) + 1
 STRN_T10_ARM_MARKERS = ("STRN", "T10", "LUPA", "RUPA", "LELB", "RELB")
 STRN_T10_ARM_MARKERS_SET = frozenset(m.upper() for m in STRN_T10_ARM_MARKERS)
 
+# Pelvis (4) + arm/hand (8): next 12 highest Z; Y in shoulder band → LASI,RASI,LPSI,RPSI (A/P then L/R); left/right 4 each → LFRM,LWRA,LWRB,LFIN and RFRM,RWRA,RWRB,RFIN.
+PELVIS_ARM12_MARKERS = (
+    "LASI", "RASI", "LPSI", "RPSI",
+    "LFRM", "LWRA", "LWRB", "LFIN",
+    "RFRM", "RWRA", "RWRB", "RFIN",
+)
+PELVIS_ARM12_MARKERS_SET = frozenset(m.upper() for m in PELVIS_ARM12_MARKERS)
+# Error codes for pelvis/arm12 step (for logging / diagnostics)
+PELVIS_ARM12_TOO_FEW_POINTS = "PELVIS_ARM12_TOO_FEW_POINTS"
+PELVIS_BAND_NOT_4 = "PELVIS_BAND_NOT_4"
+PELVIS_LEFT_NOT_4 = "PELVIS_LEFT_NOT_4"
+PELVIS_RIGHT_NOT_4 = "PELVIS_RIGHT_NOT_4"
+PELVIS_ARM_DUPLICATE_INDEX = "PELVIS_ARM_DUPLICATE_INDEX"
+PELVIS_ARM_MISSING_GROUP = "PELVIS_ARM_MISSING_GROUP"
+ARM_SIDE_TOO_FEW_FOR_Z = "ARM_SIDE_TOO_FEW_FOR_Z"
+ARM_SIDE_INVALID_Z_ORDER = "ARM_SIDE_INVALID_Z_ORDER"
+
 # Trunk markers: pelvis + thorax + head (similar geometry in static T-pose and walking).
 # Used for trunk-only best-frame selection and Procrustes alignment (see STATIC_T_POSE_VS_DYNAMIC_WALKING.md).
 TRUNK_LABELS = (

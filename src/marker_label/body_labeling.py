@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
@@ -15,6 +16,7 @@ from .constants import (
     CLAV_RBAK_MARKERS,
     CLAV_RBAK_MARKERS_SET,
     STRN_T10_ARM_MARKERS_SET,
+    PELVIS_ARM12_MARKERS_SET,
     TRUNK_LABELS,
 )
 from .constants import (
@@ -343,6 +345,137 @@ def assign_strn_t10_arm4_after_clav_rbak(
     ]
 
     return strn_t10_assignments + left_assignments + right_assignments
+
+
+def assign_pelvis_arm12_after_strn_t10_arm(
+    points_frame: np.ndarray,
+    d_back_xy: np.ndarray,
+    d_right_xy: np.ndarray,
+    exclude_pt_indices: set[int],
+    lsho_idx: int,
+    rsho_idx: int,
+    template: dict,
+) -> list[tuple[int, str]]:
+    """
+    After STRN/T10/arm4: from remaining points take the 12 highest Z.
+    - 4 points with Y between LSHO and RSHO -> pelvis: A/P sort -> anterior 2 = LASI,RASI (L/R by Y), posterior 2 = LPSI,RPSI (L/R by Y).
+    - Remaining 8: left 4 (Y on left side of LSHO), right 4 (Y on right side of RSHO).
+    - Left 4: Z max=LFRM, Z min=LFIN; middle 2 by A/P -> LWRA (anterior), LWRB (posterior).
+    - Right 4: Z max=RFRM, Z min=RFIN; middle 2 by A/P -> RWRA, RWRB.
+    All comparisons use point values directly (no centroid). Logs error codes on failure.
+    """
+    logger = logging.getLogger(__name__)
+    y_lsho = float(points_frame[lsho_idx, 1])
+    y_rsho = float(points_frame[rsho_idx, 1])
+    if not (np.isfinite(y_lsho) and np.isfinite(y_rsho)):
+        return []
+    y_min = min(y_lsho, y_rsho)
+    y_max = max(y_lsho, y_rsho)
+    larger_y_is_left = d_right_xy[1] < 0
+
+    remaining = [
+        i for i in range(points_frame.shape[0])
+        if i not in exclude_pt_indices and np.isfinite(points_frame[i, 2])
+    ]
+    if len(remaining) < 12:
+        logger.warning(
+            "PELVIS_ARM12_TOO_FEW_POINTS: Fewer than 12 remaining points for pelvis/arm candidates (got %d).",
+            len(remaining),
+        )
+        return []
+
+    z_vals = np.array([points_frame[i, 2] for i in remaining])
+    order_z = np.argsort(-z_vals)[:12]
+    top12 = [remaining[int(k)] for k in order_z]
+
+    def _lab(name: str) -> str:
+        return next((lab for lab in template if str(lab).strip().upper() == name.upper()), name)
+
+    in_band = [i for i in top12 if y_min <= points_frame[i, 1] <= y_max]
+    if len(in_band) != 4:
+        logger.warning(
+            "PELVIS_BAND_NOT_4: Expected 4 pelvis candidates in shoulder Y-band, got %d (y in [%.1f, %.1f]).",
+            len(in_band), y_min, y_max,
+        )
+        return []
+
+    dot_back = np.array([float(points_frame[i, :2] @ d_back_xy) for i in in_band])
+    order_ap = np.argsort(dot_back)
+    anterior_two = [in_band[order_ap[0]], in_band[order_ap[1]]]
+    posterior_two = [in_band[order_ap[2]], in_band[order_ap[3]]]
+    y_ant = np.array([points_frame[i, 1] for i in anterior_two])
+    y_post = np.array([points_frame[i, 1] for i in posterior_two])
+    if larger_y_is_left:
+        order_lr_ant = np.argsort(-y_ant)
+        order_lr_post = np.argsort(-y_post)
+    else:
+        order_lr_ant = np.argsort(y_ant)
+        order_lr_post = np.argsort(y_post)
+    label_lasi = _lab("LASI")
+    label_rasi = _lab("RASI")
+    label_lpsi = _lab("LPSI")
+    label_rpsi = _lab("RPSI")
+    pelvis_assignments = [
+        (anterior_two[order_lr_ant[0]], label_lasi),
+        (anterior_two[order_lr_ant[1]], label_rasi),
+        (posterior_two[order_lr_post[0]], label_lpsi),
+        (posterior_two[order_lr_post[1]], label_rpsi),
+    ]
+
+    pelvis_pts = {i for i in in_band}
+    rest8 = [i for i in top12 if i not in pelvis_pts]
+    if len(rest8) != 8:
+        logger.warning(
+            "PELVIS_ARM_MISSING_GROUP: Pelvis/arm partition incomplete: pelvis=4 rest=%d (expected 8).",
+            len(rest8),
+        )
+        return pelvis_assignments
+
+    y_rest = np.array([points_frame[i, 1] for i in rest8])
+    if larger_y_is_left:
+        order_y = np.argsort(-y_rest)
+    else:
+        order_y = np.argsort(y_rest)
+    left4 = [rest8[order_y[0]], rest8[order_y[1]], rest8[order_y[2]], rest8[order_y[3]]]
+    right4 = [rest8[order_y[4]], rest8[order_y[5]], rest8[order_y[6]], rest8[order_y[7]]]
+
+    def assign_arm_side(four_pts: list[int], label_frm: str, label_wra: str, label_wrb: str, label_fin: str) -> list[tuple[int, str]]:
+        if len(four_pts) < 4:
+            logger.warning("ARM_SIDE_TOO_FEW_FOR_Z: Arm group has fewer than 4 points: got %d.", len(four_pts))
+            return []
+        z_vals = np.array([points_frame[i, 2] for i in four_pts])
+        if np.any(~np.isfinite(z_vals)) or np.ptp(z_vals) == 0:
+            logger.warning("ARM_SIDE_INVALID_Z_ORDER: Arm side points have identical or invalid Z.")
+            return []
+        order_z_desc = np.argsort(-z_vals)
+        frm_pt = four_pts[order_z_desc[0]]
+        fin_pt = four_pts[order_z_desc[3]]
+        mid_two = [four_pts[order_z_desc[1]], four_pts[order_z_desc[2]]]
+        dot_mid = np.array([float(points_frame[i, :2] @ d_back_xy) for i in mid_two])
+        order_ap_mid = np.argsort(dot_mid)
+        anterior_pt = mid_two[order_ap_mid[0]]
+        posterior_pt = mid_two[order_ap_mid[1]]
+        return [
+            (frm_pt, label_frm),
+            (anterior_pt, label_wra),
+            (posterior_pt, label_wrb),
+            (fin_pt, label_fin),
+        ]
+
+    label_lfrm = _lab("LFRM")
+    label_lwra = _lab("LWRA")
+    label_lwrb = _lab("LWRB")
+    label_lfin = _lab("LFIN")
+    label_rfrm = _lab("RFRM")
+    label_rwra = _lab("RWRA")
+    label_rwrb = _lab("RWRB")
+    label_rfin = _lab("RFIN")
+    left_assignments = assign_arm_side(left4, label_lfrm, label_lwra, label_lwrb, label_lfin)
+    right_assignments = assign_arm_side(right4, label_rfrm, label_rwra, label_rwrb, label_rfin)
+    if len(left_assignments) < 4 or len(right_assignments) < 4:
+        return pelvis_assignments + left_assignments + right_assignments
+
+    return pelvis_assignments + left_assignments + right_assignments
 
 
 def _rigid_transform_3d(src: np.ndarray, tgt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -996,6 +1129,29 @@ def label_body_markers(
             )
             if strn_t10_arm_assignments:
                 priority_pt_set = priority_pt_set | {pi for pi, _ in strn_t10_arm_assignments}
+        # Pelvis (LASI,RASI,LPSI,RPSI) + arm/hand (LFRM,LWRA,LWRB,LFIN, RFRM,RWRA,RWRB,RFIN): next 12 Z; Y band -> pelvis A/P then L/R; rest left/right 4 each -> Z and A/P
+        pelvis_arm12_assignments: list[tuple[int, str]] = []
+        use_pelvis_arm12 = (
+            use_strn_t10_arm
+            and len(strn_t10_arm_assignments) >= 6
+            and d_back_xy is not None
+            and len(d_back_xy) == 2
+            and d_right_xy is not None
+            and len(d_right_xy) == 2
+            and any(str(lab).strip().upper() in PELVIS_ARM12_MARKERS_SET for lab in template)
+        )
+        if use_pelvis_arm12 and lsho_idx >= 0 and rsho_idx >= 0:
+            pelvis_arm12_assignments = assign_pelvis_arm12_after_strn_t10_arm(
+                points_dynamic[best_f],
+                d_back_xy,
+                d_right_xy,
+                priority_pt_set,
+                lsho_idx,
+                rsho_idx,
+                template,
+            )
+            if pelvis_arm12_assignments:
+                priority_pt_set = priority_pt_set | {pi for pi, _ in pelvis_arm12_assignments}
         exclude_labels_z = HEAD_MARKERS_SET
         if c7_shoulder_assignments:
             exclude_labels_z = HEAD_MARKERS_SET | C7_SHOULDER_MARKERS_SET
@@ -1003,6 +1159,8 @@ def label_body_markers(
             exclude_labels_z = exclude_labels_z | CLAV_RBAK_MARKERS_SET
         if strn_t10_arm_assignments:
             exclude_labels_z = exclude_labels_z | STRN_T10_ARM_MARKERS_SET
+        if pelvis_arm12_assignments:
+            exclude_labels_z = exclude_labels_z | PELVIS_ARM12_MARKERS_SET
         band_assignments = _match_within_z_bands(
             points_dynamic[best_f],
             template,
@@ -1010,12 +1168,12 @@ def label_body_markers(
             point_bands,
             use_hungarian=use_hungarian,
             max_match_distance=max_match_distance,
-            exclude_pt_indices=priority_pt_set if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments) else None,
-            exclude_labels=exclude_labels_z if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments) else None,
+            exclude_pt_indices=priority_pt_set if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments or pelvis_arm12_assignments) else None,
+            exclude_labels=exclude_labels_z if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments or pelvis_arm12_assignments) else None,
         )
-        assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments + band_assignments
-        # Preserve axis/Z-based assignments so Procrustes+Hungarian do not overwrite head, C7, shoulders, CLAV, RBAK, STRN/T10/arm4
-        axis_based_assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments
+        assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments + pelvis_arm12_assignments + band_assignments
+        # Preserve axis/Z-based assignments so Procrustes+Hungarian do not overwrite head, C7, shoulders, CLAV, RBAK, STRN/T10/arm4, pelvis/arm12
+        axis_based_assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments + pelvis_arm12_assignments
         # If template has more labels than label_to_band (e.g. 39 vs 27), match remaining points to arm/hand
         assigned_pts = {pi for pi, _ in assignments}
         assigned_labs = {str(lab).strip().upper() for _, lab in assignments}

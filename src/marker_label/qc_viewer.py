@@ -155,18 +155,31 @@ def run_viewer(
             strn_t10_arm_names.append(labels[i].strip() if i < len(labels) else name)
         except StopIteration:
             pass
+    # Pelvis + arm/hand: LASI, RASI, LPSI, RPSI, LFRM, LWRA, LWRB, LFIN, RFRM, RWRA, RWRB, RFIN
+    pelvis_arm12_order = ("LASI", "RASI", "LPSI", "RPSI", "LFRM", "LWRA", "LWRB", "LFIN", "RFRM", "RWRA", "RWRB", "RFIN")
+    pelvis_arm12_indices = []
+    pelvis_arm12_names = []
+    for name in pelvis_arm12_order:
+        try:
+            i = next(ix for ix, s in enumerate(label_stripped) if str(s).strip().upper() == name.upper())
+            pelvis_arm12_indices.append(i)
+            pelvis_arm12_names.append(labels[i].strip() if i < len(labels) else name)
+        except StopIteration:
+            pass
     if background == "white":
         obs_text_color, obs_shape_color = "black", "lightgrey"
         head_text_color, head_shape_color = "darkblue", "lavender"
         c7_shoulder_text_color, c7_shoulder_shape_color = "darkgreen", "honeydew"
         clav_rbak_text_color, clav_rbak_shape_color = "saddlebrown", "wheat"
         strn_t10_arm_text_color, strn_t10_arm_shape_color = "darkcyan", "azure"
+        pelvis_arm12_text_color, pelvis_arm12_shape_color = "purple", "plum"
     else:
         obs_text_color, obs_shape_color = "white", "dimgrey"
         head_text_color, head_shape_color = "lightblue", "dimgrey"
         c7_shoulder_text_color, c7_shoulder_shape_color = "lightgreen", "dimgrey"
         clav_rbak_text_color, clav_rbak_shape_color = "wheat", "dimgrey"
         strn_t10_arm_text_color, strn_t10_arm_shape_color = "cyan", "dimgrey"
+        pelvis_arm12_text_color, pelvis_arm12_shape_color = "magenta", "dimgrey"
 
     def add_obstacle_labels(f: int) -> None:
         try:
@@ -283,11 +296,35 @@ def run_viewer(
             name="strn_t10_arm_labels",
         )
 
+    def add_pelvis_arm12_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("pelvis_arm12_labels")
+        except Exception:
+            pass
+        if not pelvis_arm12_indices:
+            return
+        pts_f = pts_display[f]
+        pa_pts = pts_f[pelvis_arm12_indices]
+        pa_cloud = pv.PolyData(pa_pts)
+        pa_cloud["names"] = np.array(pelvis_arm12_names, dtype="U")
+        plotter.add_point_labels(
+            pa_cloud,
+            "names",
+            font_size=12,
+            show_points=False,
+            text_color=pelvis_arm12_text_color,
+            shape_color=pelvis_arm12_shape_color,
+            shape_opacity=0.85,
+            always_visible=True,
+            name="pelvis_arm12_labels",
+        )
+
     add_obstacle_labels(0)
     add_head_labels(0)
     add_c7_shoulder_labels(0)
     add_clav_rbak_labels(0)
     add_strn_t10_arm_labels(0)
+    add_pelvis_arm12_labels(0)
     plotter.add_text(f"Frame 0 / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
 
     # Shared state: current frame index, playing flag, optional slider widget
@@ -308,6 +345,7 @@ def run_viewer(
         add_c7_shoulder_labels(f)
         add_clav_rbak_labels(f)
         add_strn_t10_arm_labels(f)
+        add_pelvis_arm12_labels(f)
         plotter.add_text(f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
         if slider_widget[0] is not None:
             try:
