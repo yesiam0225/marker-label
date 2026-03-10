@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Run the pipeline (screening → obstacle → head → C7/shoulders by Z, then Z-band),
-then export obstacle + head + C7 + shoulders + CLAV + RBAK (11 markers) and open the QC viewer.
+then export obstacle + head + C7 + shoulders + CLAV + RBAK + STRN + T10 + arm (17 markers) and open the QC viewer.
 
 Usage:
   python scripts/run_obstacle_head_check.py <static.c3d> <dynamic.c3d> -o <out_prefix> [--no-viewer]
@@ -15,14 +15,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from marker_label.constants import HEAD_MARKERS, OBSTACLE_LABELS, C7_SHOULDER_MARKERS, CLAV_RBAK_MARKERS
+from marker_label.constants import HEAD_MARKERS, OBSTACLE_LABELS, C7_SHOULDER_MARKERS, CLAV_RBAK_MARKERS, STRN_T10_ARM_MARKERS
 from marker_label.pipeline import run_pipeline
 from marker_label.inspect_quality import load_labeled_csv
 from marker_label.export import export_csv
 from marker_label.io import save_c3d
 
-# Obstacle + head + C7 + shoulders + CLAV + RBAK (11 markers)
-OBSTACLE_HEAD_C7_SHOULDERS = list(OBSTACLE_LABELS) + list(HEAD_MARKERS) + list(C7_SHOULDER_MARKERS) + list(CLAV_RBAK_MARKERS)
+# Obstacle + head + C7 + shoulders + CLAV + RBAK + STRN + T10 + LUPA + RUPA + LELB + RELB (17 markers)
+OBSTACLE_HEAD_17 = (
+    list(OBSTACLE_LABELS) + list(HEAD_MARKERS) + list(C7_SHOULDER_MARKERS)
+    + list(CLAV_RBAK_MARKERS) + list(STRN_T10_ARM_MARKERS)
+)
 
 
 def extract_subset_from_labeled_csv(
@@ -62,11 +65,11 @@ def extract_obstacle_head_from_labeled_csv(
     rate: float = 0.0,
     first_frame: int = 1,
 ) -> None:
-    """Export obstacle + head + C7 + shoulders + CLAV + RBAK (11 markers) from full labeled CSV."""
+    """Export obstacle + head + C7 + shoulders + CLAV + RBAK + STRN/T10/arm (17 markers) from full labeled CSV."""
     extract_subset_from_labeled_csv(
         full_csv_path,
         f"{out_prefix}_obstacle_head_c7_shoulders_labeled",
-        OBSTACLE_HEAD_C7_SHOULDERS,
+        OBSTACLE_HEAD_17,
         rate=rate,
         first_frame=first_frame,
     )

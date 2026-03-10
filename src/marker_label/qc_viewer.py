@@ -144,16 +144,29 @@ def run_viewer(
             clav_rbak_names.append(labels[i].strip() if i < len(labels) else name)
         except StopIteration:
             pass
+    # STRN, T10, LUPA, RUPA, LELB, RELB
+    strn_t10_arm_order = ("STRN", "T10", "LUPA", "RUPA", "LELB", "RELB")
+    strn_t10_arm_indices = []
+    strn_t10_arm_names = []
+    for name in strn_t10_arm_order:
+        try:
+            i = next(ix for ix, s in enumerate(label_stripped) if str(s).strip().upper() == name.upper())
+            strn_t10_arm_indices.append(i)
+            strn_t10_arm_names.append(labels[i].strip() if i < len(labels) else name)
+        except StopIteration:
+            pass
     if background == "white":
         obs_text_color, obs_shape_color = "black", "lightgrey"
         head_text_color, head_shape_color = "darkblue", "lavender"
         c7_shoulder_text_color, c7_shoulder_shape_color = "darkgreen", "honeydew"
         clav_rbak_text_color, clav_rbak_shape_color = "saddlebrown", "wheat"
+        strn_t10_arm_text_color, strn_t10_arm_shape_color = "darkcyan", "azure"
     else:
         obs_text_color, obs_shape_color = "white", "dimgrey"
         head_text_color, head_shape_color = "lightblue", "dimgrey"
         c7_shoulder_text_color, c7_shoulder_shape_color = "lightgreen", "dimgrey"
         clav_rbak_text_color, clav_rbak_shape_color = "wheat", "dimgrey"
+        strn_t10_arm_text_color, strn_t10_arm_shape_color = "cyan", "dimgrey"
 
     def add_obstacle_labels(f: int) -> None:
         try:
@@ -247,10 +260,34 @@ def run_viewer(
             name="clav_rbak_labels",
         )
 
+    def add_strn_t10_arm_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("strn_t10_arm_labels")
+        except Exception:
+            pass
+        if not strn_t10_arm_indices:
+            return
+        pts_f = pts_display[f]
+        arm_pts = pts_f[strn_t10_arm_indices]
+        arm_cloud = pv.PolyData(arm_pts)
+        arm_cloud["names"] = np.array(strn_t10_arm_names, dtype="U")
+        plotter.add_point_labels(
+            arm_cloud,
+            "names",
+            font_size=14,
+            show_points=False,
+            text_color=strn_t10_arm_text_color,
+            shape_color=strn_t10_arm_shape_color,
+            shape_opacity=0.85,
+            always_visible=True,
+            name="strn_t10_arm_labels",
+        )
+
     add_obstacle_labels(0)
     add_head_labels(0)
     add_c7_shoulder_labels(0)
     add_clav_rbak_labels(0)
+    add_strn_t10_arm_labels(0)
     plotter.add_text(f"Frame 0 / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
 
     # Shared state: current frame index, playing flag, optional slider widget
@@ -270,6 +307,7 @@ def run_viewer(
         add_head_labels(f)
         add_c7_shoulder_labels(f)
         add_clav_rbak_labels(f)
+        add_strn_t10_arm_labels(f)
         plotter.add_text(f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
         if slider_widget[0] is not None:
             try:

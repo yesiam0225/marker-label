@@ -87,6 +87,10 @@ CLAV_RBAK_MARKERS = ("CLAV", "RBAK")
 CLAV_RBAK_MARKERS_SET = frozenset(m.upper() for m in CLAV_RBAK_MARKERS)
 CLAV_RBAK_Y_OFFSET_MM = 15  # Allow Y in [min(LSHO_y, RSHO_y) - 15, max(...) + 15] to avoid arm markers.
 
+# STRN, T10, LUPA, RUPA, LELB, RELB: next 6 highest Z after head/C7/shoulders/CLAV/RBAK; direct x/y/z comparison (no centroid).
+STRN_T10_ARM_MARKERS = ("STRN", "T10", "LUPA", "RUPA", "LELB", "RELB")
+STRN_T10_ARM_MARKERS_SET = frozenset(m.upper() for m in STRN_T10_ARM_MARKERS)
+
 # Trunk markers: pelvis + thorax + head (similar geometry in static T-pose and walking).
 # Used for trunk-only best-frame selection and Procrustes alignment (see STATIC_T_POSE_VS_DYNAMIC_WALKING.md).
 TRUNK_LABELS = (

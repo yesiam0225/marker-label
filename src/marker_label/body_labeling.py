@@ -14,6 +14,7 @@ from .constants import (
     C7_SHOULDER_MARKERS_SET,
     CLAV_RBAK_MARKERS,
     CLAV_RBAK_MARKERS_SET,
+    STRN_T10_ARM_MARKERS_SET,
     TRUNK_LABELS,
 )
 from .constants import (
@@ -257,6 +258,91 @@ def assign_clav_rbak_after_c7_shoulders(
     out.append((clav_idx, label_clav))
     out.append((rbak_idx, label_rbak))
     return out
+
+
+def assign_strn_t10_arm4_after_clav_rbak(
+    points_frame: np.ndarray,
+    d_back_xy: np.ndarray,
+    d_right_xy: np.ndarray,
+    exclude_pt_indices: set[int],
+    lsho_idx: int,
+    rsho_idx: int,
+    template: dict,
+) -> list[tuple[int, str]]:
+    """
+    After CLAV/RBAK: from remaining points take the 6 highest Z. Two points with Y
+    between LSHO and RSHO are STRN (anterior) and T10 (posterior), by direct A/P
+    comparison (no centroid). The remaining 4 points: split by L/R (direct Y), then
+    within each side higher Z = UPA, lower Z = ELB. All comparisons use point
+    values directly (no centroid).
+    """
+    y_lsho = points_frame[lsho_idx, 1]
+    y_rsho = points_frame[rsho_idx, 1]
+    if not (np.isfinite(y_lsho) and np.isfinite(y_rsho)):
+        return []
+    y_min = min(y_lsho, y_rsho)
+    y_max = max(y_lsho, y_rsho)
+    remaining = [
+        i for i in range(points_frame.shape[0])
+        if i not in exclude_pt_indices and np.isfinite(points_frame[i, 2])
+    ]
+    if len(remaining) < 6:
+        return []
+    z_vals = np.array([points_frame[i, 2] for i in remaining])
+    order_z = np.argsort(-z_vals)[:6]
+    top6 = [remaining[int(k)] for k in order_z]
+    # Template labels (preserve case from template)
+    def _lab(name: str) -> str:
+        return next((lab for lab in template if str(lab).strip().upper() == name.upper()), name)
+    label_strn = _lab("STRN")
+    label_t10 = _lab("T10")
+    label_lupa = _lab("LUPA")
+    label_rupa = _lab("RUPA")
+    label_lelb = _lab("LELB")
+    label_relb = _lab("RELB")
+
+    # Two points with Y between shoulders → STRN (anterior), T10 (posterior); A/P by direct dot_back
+    in_band = [i for i in top6 if y_min <= points_frame[i, 1] <= y_max]
+    strn_t10_assignments: list[tuple[int, str]] = []
+    if len(in_band) >= 2:
+        dot_back = np.array([
+            float(points_frame[i, :2] @ d_back_xy) for i in in_band
+        ])
+        order_ap = np.argsort(dot_back)
+        anterior_pt = in_band[order_ap[0]]
+        posterior_pt = in_band[order_ap[1]]
+        strn_t10_assignments = [(anterior_pt, label_strn), (posterior_pt, label_t10)]
+    elif len(in_band) == 1:
+        strn_t10_assignments = [(in_band[0], label_strn)]
+
+    # Remaining 4 from top6 (exclude the 2 used for STRN/T10)
+    strn_t10_pts = {pi for pi, _ in strn_t10_assignments}
+    arm4 = [i for i in top6 if i not in strn_t10_pts]
+    if len(arm4) < 4:
+        return strn_t10_assignments
+
+    # L/R by direct Y: larger Y = left when d_right[1] < 0
+    larger_y_is_left = d_right_xy[1] < 0
+    y_arm = np.array([points_frame[i, 1] for i in arm4])
+    order_y = np.argsort(-y_arm) if larger_y_is_left else np.argsort(y_arm)
+    left_two = [arm4[order_y[0]], arm4[order_y[1]]]
+    right_two = [arm4[order_y[2]], arm4[order_y[3]]]
+
+    # Within each side: higher Z = UPA, lower Z = ELB (direct Z comparison)
+    z_left = np.array([points_frame[i, 2] for i in left_two])
+    order_z_left = np.argsort(-z_left)
+    left_assignments = [
+        (left_two[order_z_left[0]], label_lupa),
+        (left_two[order_z_left[1]], label_lelb),
+    ]
+    z_right = np.array([points_frame[i, 2] for i in right_two])
+    order_z_right = np.argsort(-z_right)
+    right_assignments = [
+        (right_two[order_z_right[0]], label_rupa),
+        (right_two[order_z_right[1]], label_relb),
+    ]
+
+    return strn_t10_assignments + left_assignments + right_assignments
 
 
 def _rigid_transform_3d(src: np.ndarray, tgt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -887,11 +973,36 @@ def label_body_markers(
                     template,
                 )
                 priority_pt_set = priority_pt_set | {pi for pi, _ in clav_rbak_assignments}
+        # STRN, T10, LUPA, RUPA, LELB, RELB: next 6 Z; Y in shoulder band → STRN/T10 (A/P); rest L/R by Y, then Z = UPA/ELB
+        strn_t10_arm_assignments: list[tuple[int, str]] = []
+        use_strn_t10_arm = (
+            use_clav_rbak_by_z
+            and len(clav_rbak_assignments) >= 2
+            and d_back_xy is not None
+            and len(d_back_xy) == 2
+            and d_right_xy is not None
+            and len(d_right_xy) == 2
+            and any(str(lab).strip().upper() in STRN_T10_ARM_MARKERS_SET for lab in template)
+        )
+        if use_strn_t10_arm and lsho_idx >= 0 and rsho_idx >= 0:
+            strn_t10_arm_assignments = assign_strn_t10_arm4_after_clav_rbak(
+                points_dynamic[best_f],
+                d_back_xy,
+                d_right_xy,
+                priority_pt_set,
+                lsho_idx,
+                rsho_idx,
+                template,
+            )
+            if strn_t10_arm_assignments:
+                priority_pt_set = priority_pt_set | {pi for pi, _ in strn_t10_arm_assignments}
         exclude_labels_z = HEAD_MARKERS_SET
         if c7_shoulder_assignments:
             exclude_labels_z = HEAD_MARKERS_SET | C7_SHOULDER_MARKERS_SET
         if clav_rbak_assignments:
             exclude_labels_z = exclude_labels_z | CLAV_RBAK_MARKERS_SET
+        if strn_t10_arm_assignments:
+            exclude_labels_z = exclude_labels_z | STRN_T10_ARM_MARKERS_SET
         band_assignments = _match_within_z_bands(
             points_dynamic[best_f],
             template,
@@ -899,12 +1010,12 @@ def label_body_markers(
             point_bands,
             use_hungarian=use_hungarian,
             max_match_distance=max_match_distance,
-            exclude_pt_indices=priority_pt_set if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments) else None,
-            exclude_labels=exclude_labels_z if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments) else None,
+            exclude_pt_indices=priority_pt_set if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments) else None,
+            exclude_labels=exclude_labels_z if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments) else None,
         )
-        assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + band_assignments
-        # Preserve axis/Z-based assignments so Procrustes+Hungarian do not overwrite head, C7, shoulders, CLAV, RBAK
-        axis_based_assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments
+        assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments + band_assignments
+        # Preserve axis/Z-based assignments so Procrustes+Hungarian do not overwrite head, C7, shoulders, CLAV, RBAK, STRN/T10/arm4
+        axis_based_assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments
         # If template has more labels than label_to_band (e.g. 39 vs 27), match remaining points to arm/hand
         assigned_pts = {pi for pi, _ in assignments}
         assigned_labs = {str(lab).strip().upper() for _, lab in assignments}
