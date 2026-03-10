@@ -5,15 +5,258 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from .constants import DEFAULT_MIDDLE_END, DEFAULT_MIDDLE_START, TRUNK_LABELS
+from .constants import (
+    DEFAULT_MIDDLE_END,
+    DEFAULT_MIDDLE_START,
+    HEAD_MARKERS,
+    HEAD_MARKERS_SET,
+    C7_SHOULDER_MARKERS,
+    C7_SHOULDER_MARKERS_SET,
+    CLAV_RBAK_MARKERS,
+    CLAV_RBAK_MARKERS_SET,
+    TRUNK_LABELS,
+)
+from .constants import (
+    SCREENING_BEST_FRAME_VISIBILITY_MIN,
+    SCREENING_FOOT_PROXY_N_SMALLEST_Z,
+)
 from .pelvis import build_pelvis_frame, points_to_pelvis_frame
+from . import static_geometry
 
 _TRUNK_SET = {t.upper() for t in TRUNK_LABELS}
+
+# CLAV/RBAK validation error codes (raised when post-assignment checks fail)
+CLAVRBAK_RBAK_NOT_POSTERIOR_TO_CLAV = "RBAK_NOT_POSTERIOR_TO_CLAV"
+CLAVRBAK_RBAK_NOT_RIGHT_OF_CLAV = "RBAK_NOT_RIGHT_OF_CLAV"
+CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE = "CLAV_OR_RBAK_OUTSIDE_SHOULDER_Y_RANGE"
+
+
+class CLAVRBAKValidationError(Exception):
+    """Raised when CLAV/RBAK labeling fails validation (Y range or RBAK posterior/right of CLAV)."""
+
+    def __init__(self, error_code: str, message: str):
+        self.error_code = error_code
+        self.message = message
+        super().__init__(f"CLAV/RBAK validation failed ({error_code}): {message}")
 
 
 def _trunk_labels_in_template(template: dict) -> list[str]:
     """Return template keys whose label (case-insensitive) is in TRUNK_LABELS."""
     return [k for k in template if str(k).strip().upper() in _TRUNK_SET]
+
+
+def assign_head_markers_by_top4_z(
+    points_frame: np.ndarray,
+    d_back_xy: np.ndarray,
+    d_right_xy: np.ndarray,
+    head_labels: list[str] | None = None,
+) -> list[tuple[int, str]]:
+    """
+    Assign head markers at one frame: sort points by Z descending, take top 4, then assign
+    LFHD, RFHD, LBHD, RBHD by A/P (d_back) and L/R (direct Y comparison, no centroid).
+
+    A/P: smaller projection onto d_back = anterior, larger = posterior.
+    L/R: compare candidate points' Y directly. When d_right_xy[1] < 0 (x increases
+    during walking), larger Y = left; when d_right_xy[1] > 0 (x decreases), smaller Y = left.
+
+    Parameters
+    ----------
+    points_frame : (n_points, 3)
+    d_back_xy : (2,) xy unit vector toward posterior
+    d_right_xy : (2,) xy unit vector toward subject's right (used only for L/R sign)
+    head_labels : optional list of 4 labels in order [LFHD, RFHD, LBHD, RBHD]
+
+    Returns
+    -------
+    assignments : list of (point_idx, label), length min(4, n_valid_points)
+    """
+    if head_labels is None:
+        head_labels = list(HEAD_MARKERS)
+    z = points_frame[:, 2]
+    valid = np.isfinite(z)
+    if np.sum(valid) < 1:
+        return []
+    order_z = np.argsort(-np.where(valid, z, -np.inf))[:4]
+    top4 = [int(i) for i in order_z if np.isfinite(points_frame[i, 2])]
+    if len(top4) < 1:
+        return []
+    xy = np.asarray(points_frame[top4, :2], dtype=np.float64)
+    centroid_xy = np.nanmean(xy, axis=0)
+    rel = xy - centroid_xy
+    dot_back = rel @ d_back_xy
+    order_ap = np.argsort(dot_back)
+    anterior_local = order_ap[:2]
+    posterior_local = order_ap[2:]
+    # L/R by direct Y comparison (no centroid): larger Y = left when d_right[1] < 0 (x increases)
+    larger_y_is_left = d_right_xy[1] < 0
+    out: list[tuple[int, str]] = []
+    if len(anterior_local) == 2:
+        y_ant = np.array([points_frame[top4[i], 1] for i in anterior_local])
+        order_y_ant = np.argsort(-y_ant) if larger_y_is_left else np.argsort(y_ant)
+        lr_ant = anterior_local[order_y_ant]
+        out.append((top4[lr_ant[0]], head_labels[0]))
+        out.append((top4[lr_ant[1]], head_labels[1]))
+    elif len(anterior_local) == 1:
+        out.append((top4[anterior_local[0]], head_labels[0]))
+    if len(posterior_local) == 2:
+        y_post = np.array([points_frame[top4[i], 1] for i in posterior_local])
+        order_y_post = np.argsort(-y_post) if larger_y_is_left else np.argsort(y_post)
+        lr_post = posterior_local[order_y_post]
+        out.append((top4[lr_post[0]], head_labels[2]))
+        out.append((top4[lr_post[1]], head_labels[3]))
+    elif len(posterior_local) == 1:
+        out.append((top4[posterior_local[0]], head_labels[2]))
+    return out
+
+
+def assign_c7_shoulders_after_head(
+    points_frame: np.ndarray,
+    d_right_xy: np.ndarray,
+    exclude_pt_indices: set[int],
+    template: dict,
+) -> list[tuple[int, str]]:
+    """
+    After head is assigned: among remaining points, sort by Z descending;
+    assign 1st = C7, 2nd and 3rd = LSHO/RSHO. L/R by direct Y comparison (no centroid):
+    when d_right_xy[1] < 0 (x increases during walking), larger Y = left; else smaller Y = left.
+
+    Parameters
+    ----------
+    points_frame : (n_points, 3)
+    d_right_xy : (2,) xy unit vector toward subject's right (used only for L/R sign)
+    exclude_pt_indices : point indices already assigned (e.g. head)
+    template : dict label -> position; used to get actual label strings for C7, LSHO, RSHO
+
+    Returns
+    -------
+    assignments : list of (point_idx, label), length 0--3
+    """
+    remaining = [i for i in range(points_frame.shape[0]) if i not in exclude_pt_indices]
+    z = points_frame[:, 2]
+    valid = np.array([np.isfinite(z[i]) for i in remaining])
+    if np.sum(valid) < 1:
+        return []
+    order_z = np.argsort(-np.array([z[i] if np.isfinite(z[i]) else -np.inf for i in remaining]))[:3]
+    top3 = [remaining[int(i)] for i in order_z if np.isfinite(points_frame[remaining[i], 2])]
+    if len(top3) < 1:
+        return []
+    # Template labels for C7, LSHO, RSHO (preserve case from template)
+    label_c7 = next((lab for lab in template if str(lab).strip().upper() == "C7"), "C7")
+    label_lsho = next((lab for lab in template if str(lab).strip().upper() == "LSHO"), "LSHO")
+    label_rsho = next((lab for lab in template if str(lab).strip().upper() == "RSHO"), "RSHO")
+    out: list[tuple[int, str]] = []
+    out.append((top3[0], label_c7))
+    if len(top3) >= 3:
+        # L/R by direct Y comparison (no centroid): larger Y = left when d_right[1] < 0
+        y_sho = points_frame[top3[1:3], 1]
+        larger_y_is_left = d_right_xy[1] < 0
+        order_y = np.argsort(-y_sho) if larger_y_is_left else np.argsort(y_sho)
+        out.append((top3[1 + order_y[0]], label_lsho))
+        out.append((top3[1 + order_y[1]], label_rsho))
+    elif len(top3) == 2:
+        y_shoulder = points_frame[top3[1], 1]
+        y_c7 = points_frame[top3[0], 1]
+        larger_y_is_left = d_right_xy[1] < 0
+        is_left = (y_shoulder > y_c7) if larger_y_is_left else (y_shoulder < y_c7)
+        out.append((top3[1], label_lsho if is_left else label_rsho))
+    return out
+
+
+def assign_clav_rbak_after_c7_shoulders(
+    points_frame: np.ndarray,
+    d_back_xy: np.ndarray,
+    d_right_xy: np.ndarray,
+    exclude_pt_indices: set[int],
+    lsho_idx: int,
+    rsho_idx: int,
+    template: dict,
+) -> list[tuple[int, str]]:
+    """
+    After C7 and shoulders: among remaining points with Y between the two shoulders
+    (min/max of LSHO_y and RSHO_y on this frame), take the two highest Z; assign
+    highest Z = CLAV, next-highest Z = RBAK. Then validate: RBAK must be posterior and
+    right of CLAV, and both must lie in the shoulder Y range; otherwise raise
+    CLAVRBAKValidationError with an error code.
+
+    Parameters
+    ----------
+    points_frame : (n_points, 3)
+    d_back_xy : (2,) xy unit vector toward posterior (used only for validation)
+    d_right_xy : (2,) xy unit vector toward subject's right (used only for validation)
+    exclude_pt_indices : point indices already assigned (head + C7 + shoulders)
+    lsho_idx, rsho_idx : point indices for LSHO and RSHO (used for Y range on this frame)
+    template : for label strings CLAV, RBAK
+
+    Returns
+    -------
+    assignments : list of (point_idx, label), length 0--2
+
+    Raises
+    ------
+    CLAVRBAKValidationError
+        If RBAK is not posterior to CLAV, not right of CLAV, or CLAV/RBAK Y outside shoulder range.
+    """
+    y_lsho = points_frame[lsho_idx, 1]
+    y_rsho = points_frame[rsho_idx, 1]
+    if not (np.isfinite(y_lsho) and np.isfinite(y_rsho)):
+        return []
+    y_min = min(y_lsho, y_rsho)
+    y_max = max(y_lsho, y_rsho)
+    remaining = [
+        i for i in range(points_frame.shape[0])
+        if i not in exclude_pt_indices
+        and np.isfinite(points_frame[i, 2])
+        and y_min <= points_frame[i, 1] <= y_max
+    ]
+    if len(remaining) < 1:
+        return []
+    z_vals = np.array([points_frame[i, 2] for i in remaining])
+    order_z = np.argsort(-z_vals)[:2]
+    top2 = [remaining[int(i)] for i in order_z]
+    label_clav = next((lab for lab in template if str(lab).strip().upper() == "CLAV"), "CLAV")
+    label_rbak = next((lab for lab in template if str(lab).strip().upper() == "RBAK"), "RBAK")
+    out: list[tuple[int, str]] = []
+    if len(top2) == 1:
+        out.append((top2[0], label_clav))
+        return out
+    # Assign by Z order only: highest Z = CLAV, next = RBAK
+    clav_idx = top2[0]
+    rbak_idx = top2[1]
+    clav_pt = points_frame[clav_idx]
+    rbak_pt = points_frame[rbak_idx]
+    # Validation: RBAK must be posterior and right of CLAV; both in shoulder Y range
+    if clav_pt[1] < y_min or clav_pt[1] > y_max:
+        raise CLAVRBAKValidationError(
+            CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE,
+            f"CLAV Y={clav_pt[1]:.1f} outside shoulder Y range [{y_min:.1f}, {y_max:.1f}].",
+        )
+    if rbak_pt[1] < y_min or rbak_pt[1] > y_max:
+        raise CLAVRBAKValidationError(
+            CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE,
+            f"RBAK Y={rbak_pt[1]:.1f} outside shoulder Y range [{y_min:.1f}, {y_max:.1f}].",
+        )
+    xy_clav = np.asarray(clav_pt[:2], dtype=np.float64)
+    xy_rbak = np.asarray(rbak_pt[:2], dtype=np.float64)
+    centroid_xy = np.nanmean(np.array([xy_clav, xy_rbak]), axis=0)
+    rel_clav = xy_clav - centroid_xy
+    rel_rbak = xy_rbak - centroid_xy
+    dot_back_clav = float(rel_clav @ d_back_xy)
+    dot_back_rbak = float(rel_rbak @ d_back_xy)
+    dot_right_clav = float(rel_clav @ d_right_xy)
+    dot_right_rbak = float(rel_rbak @ d_right_xy)
+    if dot_back_rbak <= dot_back_clav:
+        raise CLAVRBAKValidationError(
+            CLAVRBAK_RBAK_NOT_POSTERIOR_TO_CLAV,
+            f"RBAK dot_back={dot_back_rbak:.2f} not > CLAV dot_back={dot_back_clav:.2f} (RBAK must be posterior to CLAV).",
+        )
+    if dot_right_rbak <= dot_right_clav:
+        raise CLAVRBAKValidationError(
+            CLAVRBAK_RBAK_NOT_RIGHT_OF_CLAV,
+            f"RBAK dot_right={dot_right_rbak:.2f} not > CLAV dot_right={dot_right_clav:.2f} (RBAK must be right of CLAV).",
+        )
+    out.append((clav_idx, label_clav))
+    out.append((rbak_idx, label_rbak))
+    return out
 
 
 def _rigid_transform_3d(src: np.ndarray, tgt: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -89,6 +332,73 @@ def build_template_from_static(
         else:
             template[label] = np.array([np.nan, np.nan, np.nan])
     return template, origin, R
+
+
+def best_frame_by_foot_stability(
+    points: np.ndarray,
+    *,
+    middle_start: float = DEFAULT_MIDDLE_START,
+    middle_end: float = DEFAULT_MIDDLE_END,
+    visibility_min: float = SCREENING_BEST_FRAME_VISIBILITY_MIN,
+    n_smallest_z: int = SCREENING_FOOT_PROXY_N_SMALLEST_Z,
+    fallback_fn=None,
+) -> int:
+    """
+    Step 5: Choose frame in middle with ≥visibility_min valid points and minimal |v_foot|.
+
+    Foot-height proxy = mean of the n_smallest_z smallest Z values per frame (feet on ground).
+    v_foot(t) = central difference of this proxy; minimize |v_foot| for both feet on ground.
+
+    Parameters
+    ----------
+    points : (n_frames, n_points, 3)
+    middle_start, middle_end : fraction of frames for middle portion
+    visibility_min : require this fraction of points valid in the frame (e.g. 0.95)
+    n_smallest_z : number of smallest Z values to average for foot proxy
+    fallback_fn : callable(points, **kwargs) -> int; used when no frame meets visibility_min
+
+    Returns
+    -------
+    frame_idx : int
+    """
+    n_frames, n_points, _ = points.shape
+    start = int(n_frames * middle_start)
+    end = int(n_frames * middle_end)
+    start = max(0, min(start, n_frames - 1))
+    end = max(start + 1, min(end, n_frames))
+    candidates = list(range(start, end))
+
+    # Per-frame: fraction valid, and foot proxy (mean of n_smallest_z smallest Z)
+    valid_per_frame = np.isfinite(points).all(axis=2)  # (n_frames, n_points)
+    n_valid_per_frame = np.sum(valid_per_frame, axis=1)
+    frac_valid = n_valid_per_frame / n_points if n_points > 0 else np.zeros(n_frames)
+
+    z_foot = np.full(n_frames, np.nan)
+    for f in range(n_frames):
+        z_vals = points[f, :, 2].copy()
+        z_vals[~np.isfinite(z_vals)] = np.nan
+        finite = np.isfinite(z_vals)
+        if np.sum(finite) >= n_smallest_z:
+            smallest = np.partition(z_vals[finite], min(n_smallest_z - 1, np.sum(finite) - 1))[:n_smallest_z]
+            z_foot[f] = np.mean(smallest)
+
+    # Central difference for v_foot; at boundaries use one-sided or inf
+    v_foot = np.full(n_frames, np.inf)
+    for f in range(1, n_frames - 1):
+        if np.isfinite(z_foot[f - 1]) and np.isfinite(z_foot[f + 1]):
+            v_foot[f] = (z_foot[f + 1] - z_foot[f - 1]) / 2.0
+
+    # Restrict to candidates with visibility >= visibility_min and finite |v_foot|
+    good = [
+        f for f in candidates
+        if frac_valid[f] >= visibility_min and np.isfinite(v_foot[f])
+    ]
+    if good:
+        return int(min(good, key=lambda f: np.abs(v_foot[f])))
+    if fallback_fn is not None:
+        return fallback_fn(points, middle_start=middle_start, middle_end=middle_end)
+    # Last resort: middle frame
+    return int(candidates[len(candidates) // 2])
 
 
 def best_frame_for_matching(
@@ -379,6 +689,49 @@ def propagate_labels_temporal(
     return result
 
 
+def _match_within_z_bands(
+    points_frame: np.ndarray,
+    template: dict[str, np.ndarray],
+    label_to_band: dict[str, int],
+    point_bands: np.ndarray,
+    *,
+    use_hungarian: bool = True,
+    max_match_distance: float | None = None,
+    exclude_pt_indices: set[int] | None = None,
+    exclude_labels: set[str] | None = None,
+) -> list[tuple[int, str]]:
+    """
+    Match points to template labels within each Z-band. Points and labels in the same
+    band are matched (Hungarian or greedy). Returns list of (point_idx, label).
+    Optionally exclude some point indices and labels (e.g. head already assigned).
+    """
+    from .constants import N_Z_BANDS
+
+    exclude_pt = exclude_pt_indices or set()
+    exclude_lab = exclude_labels or set()
+    exclude_lab_upper = {str(l).strip().upper() for l in exclude_lab}
+    assignments: list[tuple[int, str]] = []
+    for b in range(N_Z_BANDS):
+        pt_idx = np.array([i for i in np.where(point_bands == b)[0] if i not in exclude_pt])
+        labels_b = [
+            lab for lab in template
+            if label_to_band.get(lab, -1) == b and str(lab).strip().upper() not in exclude_lab_upper
+        ]
+        if len(pt_idx) == 0 or len(labels_b) == 0:
+            continue
+        sub_pts = points_frame[pt_idx]
+        sub_tpl = {lab: template[lab] for lab in labels_b}
+        asgn = match_markers_to_template(
+            sub_pts,
+            sub_tpl,
+            use_hungarian=use_hungarian,
+            max_match_distance=max_match_distance,
+        )
+        for local_i, lab in asgn:
+            assignments.append((int(pt_idx[local_i]), lab))
+    return assignments
+
+
 def label_body_markers(
     points_dynamic: np.ndarray,
     template: dict[str, np.ndarray],
@@ -389,28 +742,64 @@ def label_body_markers(
     use_hungarian: bool = True,
     max_match_distance: float | None = None,
     max_propagation_distance: float | None = None,
+    label_to_band: dict[str, int] | None = None,
+    band_sizes: tuple[int, ...] | None = None,
+    segment_geometry: list | None = None,
+    use_screening_best_frame: bool = True,
+    walking_direction_x: float | None = None,
+    d_back_xy: np.ndarray | None = None,
+    d_right_xy: np.ndarray | None = None,
 ) -> tuple[list[str], np.ndarray]:
     """
     Label body markers in dynamic trial using template and temporal propagation.
 
+    When label_to_band is provided (from static Z-band by rank), matching is done
+    within each Z-band: dynamic points are assigned to bands by Z rank, then matched
+    to template labels in the same band. segment_geometry is for arm/hand labeling
+    and gap filling (used in a later step).
+
     Parameters
     ----------
-    points_dynamic : (n_frames, n_points, 3) (remaining points after obstacle removal)
-    template : label -> (3,) mean position (same frame as points_dynamic)
+    points_dynamic : (n_frames, n_points, 3)
+    template : label -> (3,) mean position
     residual_dynamic : optional (n_frames, n_points)
     middle_start, middle_end : frame range for best frame
-    use_hungarian : use optimal assignment at best frame (default True)
-    max_match_distance : reject initial assignment if distance > this mm (default None)
-    max_propagation_distance : do not propagate if nearest > this mm per frame (default None)
+    use_hungarian, max_match_distance, max_propagation_distance : as before
+    label_to_band : optional dict from static Z-band by rank (label -> band index)
+    band_sizes : when using no-arm-hand z-band, pass Z_BAND_SIZES_NO_ARM_HAND for point band assignment
+    segment_geometry : optional list from static segment geometry (arm/hand, gap fill)
+    use_screening_best_frame : if True (default), use Step 5: middle range, ≥95%% visibility,
+        minimal |v_foot| (foot proxy = mean of 6 smallest Z); fallback to trunk cost or residual.
+    walking_direction_x : optional; used only for head assignment when d_back_xy/d_right_xy set.
+    d_back_xy, d_right_xy : optional (2,) xy vectors from get_lr_ap_axes_from_walking. When both
+        provided, head markers (LFHD, RFHD, LBHD, RBHD) are assigned at best frame by top 4 Z and
+        L/R (d_right), A/P (d_back); remaining points/labels then use Z-band matching.
 
     Returns
     -------
-    labels_out : list of str, length n_points (order of points_dynamic)
-    label_per_frame : (n_frames, n_points) object array, label per point per frame
+    labels_out : list of str, length n_points
+    label_per_frame : (n_frames, n_points) object array
     """
     n_frames, n_points, _ = points_dynamic.shape
     trunk_labels = _trunk_labels_in_template(template)
-    if len(trunk_labels) >= 3:
+    if use_screening_best_frame:
+        def _fallback(pts: np.ndarray, **kw) -> int:
+            if len(trunk_labels) >= 3:
+                return best_frame_by_trunk_cost(
+                    pts, template, residual_dynamic,
+                    use_hungarian=use_hungarian,
+                    max_match_distance=max_match_distance,
+                    trunk_labels=trunk_labels,
+                    **kw,
+                )
+            return best_frame_for_matching(pts, residual_dynamic, **kw)
+        best_f = best_frame_by_foot_stability(
+            points_dynamic,
+            middle_start=middle_start,
+            middle_end=middle_end,
+            fallback_fn=_fallback,
+        )
+    elif len(trunk_labels) >= 3:
         best_f = best_frame_by_trunk_cost(
             points_dynamic, template, residual_dynamic,
             middle_start=middle_start, middle_end=middle_end,
@@ -423,13 +812,129 @@ def label_body_markers(
             points_dynamic, residual_dynamic,
             middle_start=middle_start, middle_end=middle_end,
         )
-    assignments = match_markers_to_template(
-        points_dynamic[best_f],
-        template,
-        use_hungarian=use_hungarian,
-        max_match_distance=max_match_distance,
-    )
+
+    if label_to_band:
+        point_bands = static_geometry.assign_point_bands_by_z_rank(
+            points_dynamic[best_f],
+            band_sizes=band_sizes,
+        )
+        # Head markers: assign by top 4 Z and L/R (d_right), A/P (d_back) when axes provided
+        head_assignments: list[tuple[int, str]] = []
+        head_pt_set: set[int] = set()
+        use_head_by_z = (
+            d_back_xy is not None
+            and d_right_xy is not None
+            and len(d_back_xy) == 2
+            and len(d_right_xy) == 2
+            and any(str(lab).strip().upper() in HEAD_MARKERS_SET for lab in template)
+        )
+        if use_head_by_z:
+            head_labels_ordered = [
+                lab for m in HEAD_MARKERS
+                for lab in template
+                if str(lab).strip().upper() == m
+            ]
+            head_assignments = assign_head_markers_by_top4_z(
+                points_dynamic[best_f],
+                d_back_xy,
+                d_right_xy,
+                head_labels=head_labels_ordered if head_labels_ordered else None,
+            )
+            head_pt_set = {pi for pi, _ in head_assignments}
+        # C7 and shoulders: among remaining points, top 1 Z = C7, next 2 Z = LSHO/RSHO (L/R by d_right)
+        c7_shoulder_assignments: list[tuple[int, str]] = []
+        priority_pt_set = set(head_pt_set)
+        use_c7_shoulder_by_z = (
+            use_head_by_z
+            and d_right_xy is not None
+            and len(d_right_xy) == 2
+            and any(str(lab).strip().upper() in C7_SHOULDER_MARKERS_SET for lab in template)
+        )
+        if use_c7_shoulder_by_z:
+            c7_shoulder_assignments = assign_c7_shoulders_after_head(
+                points_dynamic[best_f],
+                d_right_xy,
+                head_pt_set,
+                template,
+            )
+            priority_pt_set = head_pt_set | {pi for pi, _ in c7_shoulder_assignments}
+        # CLAV and RBAK: next 2 Z among points with Y between shoulders ± 15 mm; anterior = CLAV, posterior = RBAK
+        clav_rbak_assignments: list[tuple[int, str]] = []
+        use_clav_rbak_by_z = (
+            use_c7_shoulder_by_z
+            and len(c7_shoulder_assignments) >= 3
+            and d_back_xy is not None
+            and len(d_back_xy) == 2
+            and any(str(lab).strip().upper() in CLAV_RBAK_MARKERS_SET for lab in template)
+        )
+        if use_clav_rbak_by_z:
+            lsho_idx = next(
+                (pi for pi, lab in c7_shoulder_assignments if str(lab).strip().upper() == "LSHO"),
+                -1,
+            )
+            rsho_idx = next(
+                (pi for pi, lab in c7_shoulder_assignments if str(lab).strip().upper() == "RSHO"),
+                -1,
+            )
+            if lsho_idx >= 0 and rsho_idx >= 0:
+                clav_rbak_assignments = assign_clav_rbak_after_c7_shoulders(
+                    points_dynamic[best_f],
+                    d_back_xy,
+                    d_right_xy,
+                    priority_pt_set,
+                    lsho_idx,
+                    rsho_idx,
+                    template,
+                )
+                priority_pt_set = priority_pt_set | {pi for pi, _ in clav_rbak_assignments}
+        exclude_labels_z = HEAD_MARKERS_SET
+        if c7_shoulder_assignments:
+            exclude_labels_z = HEAD_MARKERS_SET | C7_SHOULDER_MARKERS_SET
+        if clav_rbak_assignments:
+            exclude_labels_z = exclude_labels_z | CLAV_RBAK_MARKERS_SET
+        band_assignments = _match_within_z_bands(
+            points_dynamic[best_f],
+            template,
+            label_to_band,
+            point_bands,
+            use_hungarian=use_hungarian,
+            max_match_distance=max_match_distance,
+            exclude_pt_indices=priority_pt_set if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments) else None,
+            exclude_labels=exclude_labels_z if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments) else None,
+        )
+        assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + band_assignments
+        # Preserve axis/Z-based assignments so Procrustes+Hungarian do not overwrite head, C7, shoulders, CLAV, RBAK
+        axis_based_assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments
+        # If template has more labels than label_to_band (e.g. 39 vs 27), match remaining points to arm/hand
+        assigned_pts = {pi for pi, _ in assignments}
+        assigned_labs = {str(lab).strip().upper() for _, lab in assignments}
+        unassigned_pts = [pi for pi in range(n_points) if pi not in assigned_pts]
+        unassigned_labels = [
+            lab for lab in template
+            if str(lab).strip().upper() not in assigned_labs
+        ]
+        if unassigned_pts and unassigned_labels:
+            sub_pts = points_dynamic[best_f][unassigned_pts]
+            sub_tpl = {lab: template[lab] for lab in unassigned_labels}
+            asgn = match_markers_to_template(
+                sub_pts,
+                sub_tpl,
+                use_hungarian=use_hungarian,
+                max_match_distance=max_match_distance,
+            )
+            for local_i, lab in asgn:
+                assignments.append((int(unassigned_pts[local_i]), lab))
+    else:
+        axis_based_assignments = []
+    if not label_to_band:
+        assignments = match_markers_to_template(
+            points_dynamic[best_f],
+            template,
+            use_hungarian=use_hungarian,
+            max_match_distance=max_match_distance,
+        )
     # Align template using trunk-only Procrustes, then re-match — unless alignment quality is bad (fallback).
+    # Do not overwrite axis/Z-based assignments (head, C7, shoulders, CLAV, RBAK) with Hungarian re-match.
     _TRUNK_RMS_MAX_MM = 150.0  # reject Procrustes if trunk RMS after align exceeds this
     if len(trunk_labels) >= 3 and assignments:
         initial_rms = _trunk_rms(
@@ -439,17 +944,47 @@ def label_body_markers(
             points_dynamic[best_f], template, assignments, trunk_labels,
         )
         template_aligned = _apply_rigid_to_template(template, R, t)
-        assignments_aligned = match_markers_to_template(
-            points_dynamic[best_f],
-            template_aligned,
-            use_hungarian=use_hungarian,
-            max_match_distance=max_match_distance,
-        )
-        aligned_rms = _trunk_rms(
-            points_dynamic[best_f], template_aligned, assignments_aligned, trunk_labels,
-        )
-        if aligned_rms < _TRUNK_RMS_MAX_MM and aligned_rms < initial_rms:
-            assignments = assignments_aligned
+        if axis_based_assignments:
+            # Preserve head, C7, shoulders, CLAV, RBAK; re-match only remaining points to remaining labels
+            axis_based_pt_set = {pi for pi, _ in axis_based_assignments}
+            axis_based_lab_set = {str(lab).strip().upper() for _, lab in axis_based_assignments}
+            remaining_pts = [i for i in range(n_points) if i not in axis_based_pt_set]
+            remaining_labs = [
+                lab for lab in template
+                if str(lab).strip().upper() not in axis_based_lab_set
+            ]
+            if remaining_pts and remaining_labs:
+                sub_pts = points_dynamic[best_f][remaining_pts]
+                sub_tpl = {lab: template_aligned[lab] for lab in remaining_labs}
+                asgn_rest = match_markers_to_template(
+                    sub_pts,
+                    sub_tpl,
+                    use_hungarian=use_hungarian,
+                    max_match_distance=max_match_distance,
+                )
+                assignments_aligned_rest = [
+                    (int(remaining_pts[local_i]), lab) for local_i, lab in asgn_rest
+                ]
+            else:
+                assignments_aligned_rest = []
+            assignments_new = list(axis_based_assignments) + assignments_aligned_rest
+            aligned_rms = _trunk_rms(
+                points_dynamic[best_f], template_aligned, assignments_new, trunk_labels,
+            )
+            if aligned_rms < _TRUNK_RMS_MAX_MM and aligned_rms < initial_rms:
+                assignments = assignments_new
+        else:
+            assignments_aligned = match_markers_to_template(
+                points_dynamic[best_f],
+                template_aligned,
+                use_hungarian=use_hungarian,
+                max_match_distance=max_match_distance,
+            )
+            aligned_rms = _trunk_rms(
+                points_dynamic[best_f], template_aligned, assignments_aligned, trunk_labels,
+            )
+            if aligned_rms < _TRUNK_RMS_MAX_MM and aligned_rms < initial_rms:
+                assignments = assignments_aligned
         # else: keep original assignments (trunk matching failed or did not help)
     if not assignments:
         return [""] * n_points, np.empty((n_frames, n_points), dtype=object)

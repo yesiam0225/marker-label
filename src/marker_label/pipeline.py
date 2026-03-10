@@ -6,9 +6,27 @@ import math
 import numpy as np
 
 from .io import load_c3d
-from .constants import PELVIS_MARKERS, DEFAULT_OBSTACLE_VISIBILITY_MIN
+from .constants import (
+    PELVIS_MARKERS,
+    DEFAULT_OBSTACLE_VISIBILITY_MIN,
+    WHOLE_BODY_39_SET,
+    Z_BAND_SIZES_NO_ARM_HAND,
+    EXPECTED_SCREENED_MARKERS,
+)
+from .screening import (
+    apply_initial_screening_steps_1_and_2,
+    compute_walking_direction_x,
+    get_lr_ap_axes_from_walking,
+    ScreeningError,
+)
 from .obstacle import detect_obstacle_markers
 from .body_labeling import build_template_from_static, label_body_markers
+from .static_geometry import (
+    build_z_band_by_rank_from_static,
+    build_z_band_no_arm_hand_from_static,
+    build_segment_geometry_from_static,
+    save_z_band_to_json,
+)
 from .export import build_full_trajectory_matrix, export_labeled
 
 # Facing axis: subject's forward direction in lab (z = up). Used to align dynamic to static.
@@ -73,6 +91,8 @@ def run_pipeline(
     max_propagation_distance: float | None = None,
     export_filled: bool = True,
     max_interp_frames: int = 10,
+    require_obstacles: bool = False,
+    check_screened_count: bool = True,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -95,6 +115,11 @@ def run_pipeline(
     max_propagation_distance : do not propagate if nearest point > this mm per frame (optional)
     export_filled : also export filled C3D/CSV
     max_interp_frames : gap-fill threshold
+    require_obstacles : if True, raise ScreeningError (Step 4) when fewer than 2 obstacle
+        markers are detected (default False).
+    check_screened_count : if True (default), raise ScreeningError (Step 2) when screened
+        column count is not EXPECTED_SCREENED_MARKERS (41). Set False to run on trials
+        with different channel count (e.g. for head-only check).
 
     Returns
     -------
@@ -109,11 +134,39 @@ def run_pipeline(
     rate = dynamic.get("rate") or 0.0
     first_frame = dynamic.get("first_frame") or 1
 
-    # 1) Obstacle detection on dynamic
+    # Dynamic trial initial screening (Steps 1–2): Y range ±1.5 m, then visibility ≥50%
+    points_d, residual_d, _keep_indices = apply_initial_screening_steps_1_and_2(
+        points_d, residual_d
+    )
+    n_screened = points_d.shape[1]
+    if check_screened_count and n_screened != EXPECTED_SCREENED_MARKERS:
+        if n_screened < EXPECTED_SCREENED_MARKERS:
+            msg = (
+                f"expected {EXPECTED_SCREENED_MARKERS} marker columns (39 body + 2 obstacles) "
+                f"after screening, got {n_screened} (too few; check Y range ±1.5 m and visibility ≥50%)."
+            )
+        else:
+            msg = (
+                f"expected {EXPECTED_SCREENED_MARKERS} marker columns (39 body + 2 obstacles) "
+                f"after screening, got {n_screened} (too many; check dynamic trial channel count)."
+            )
+        raise ScreeningError(2, msg)
+    # Step 3: walking direction and L/R–A/P axes (for head marker assignment)
+    wdx = compute_walking_direction_x(points_d)
+    d_back, d_right = get_lr_ap_axes_from_walking(wdx)
+
+    # Step 4: Obstacle detection on screened dynamic; L/R by y-axis (walking along x)
     obstacle_indices, obstacle_labels = detect_obstacle_markers(
         points_d,
         visibility_min=obstacle_visibility_min,
+        lr_axis="y",
     )
+    if require_obstacles and len(obstacle_indices) < 2:
+        raise ScreeningError(
+            4,
+            f"could not detect 2 obstacle markers (found {len(obstacle_indices)} with "
+            f"visibility >= {obstacle_visibility_min:.0%} and lowest motion).",
+        )
     n_frames_d = points_d.shape[0]
     # Extract obstacle trajectories; default (n_frames, 2, 3) NaN if none
     if len(obstacle_indices) >= 2:
@@ -142,6 +195,20 @@ def run_pipeline(
     # Filter template to body only
     template_body = {k: v for k, v in template.items() if k in body_labels_static}
 
+    # Z-band by rank and segment geometry from static (39 markers only)
+    template_39 = {
+        k: v for k, v in template_body.items()
+        if str(k).strip().upper() in WHOLE_BODY_39_SET
+    }
+    # Use no-arm-hand Z-band for dynamic labeling: save it and pass to label_body_markers
+    label_to_band_no_arm_hand = (
+        build_z_band_no_arm_hand_from_static(template_39) if template_39 else {}
+    )
+    z_band_no_arm_hand_path = f"{out_prefix}_z_band_no_arm_hand.json"
+    if label_to_band_no_arm_hand:
+        save_z_band_to_json(label_to_band_no_arm_hand, z_band_no_arm_hand_path)
+    segment_geometry = build_segment_geometry_from_static(template_39) if template_39 else []
+
     # Align dynamic to static orientation when facing axes differ (e.g. static=y, dynamic=x)
     points_d_body_for_matching = points_d_body
     if static_facing_axis and dynamic_facing_axis:
@@ -149,16 +216,22 @@ def run_pipeline(
         if R is not None:
             points_d_body_for_matching = points_d_body @ R.T  # (n_frames, n_pts, 3)
 
-    # 3) Body labeling (use rotated points for matching; output keeps original coords)
+    # 3) Body labeling: head by top-4-Z + L/R/A/P at best frame; rest by no-arm-hand Z-band
     labels_body_out, label_per_frame = label_body_markers(
         points_d_body_for_matching,
-        template_body,
+        template_39 if template_39 else template_body,
         residual_dynamic=residual_d_body,
         middle_start=middle_start,
         middle_end=middle_end,
         use_hungarian=use_hungarian,
         max_match_distance=max_match_distance,
         max_propagation_distance=max_propagation_distance,
+        label_to_band=label_to_band_no_arm_hand if label_to_band_no_arm_hand else None,
+        band_sizes=Z_BAND_SIZES_NO_ARM_HAND if label_to_band_no_arm_hand else None,
+        segment_geometry=segment_geometry if segment_geometry else None,
+        walking_direction_x=wdx,
+        d_back_xy=d_back,
+        d_right_xy=d_right,
     )
 
     # 4) Build full output: body (static order) + obstacle
@@ -191,9 +264,11 @@ def run_pipeline(
     return {
         "static_labels": labels_s,
         "body_labels_static": body_labels_static,
+        "n_screened": n_screened,
         "obstacle_indices": obstacle_indices,
         "obstacle_labels": obs_labels,
         "labels_out": labels_full,
         "n_frames": points_full.shape[0],
         "n_markers": points_full.shape[1],
+        "z_band_no_arm_hand_path": z_band_no_arm_hand_path if label_to_band_no_arm_hand else None,
     }

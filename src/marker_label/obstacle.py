@@ -50,6 +50,7 @@ def detect_obstacle_markers(
     *,
     n_obstacle: int = 2,
     visibility_min: float = DEFAULT_OBSTACLE_VISIBILITY_MIN,
+    lr_axis: str = "y",
 ) -> tuple[list[int], list[str]]:
     """
     Detect obstacle markers by stationarity and visibility.
@@ -60,11 +61,14 @@ def detect_obstacle_markers(
     labels : optional list of str (for exclusion; not used for assignment)
     n_obstacle : number of obstacle markers to select (default 2)
     visibility_min : minimum fraction of frames with valid data (default 0.8)
+    lr_axis : 'y' or 'x'. When subject walks along x-axis, use 'y' to assign
+        OBSTACLE_L / OBSTACLE_R by y position (smaller Y = L, larger Y = R).
+        Use 'x' for lab x-based assignment (smaller x = L, larger x = R).
 
     Returns
     -------
     indices : list of int, length n_obstacle (point indices)
-    obstacle_labels : list of str, OBSTACLE_L and OBSTACLE_R (L/R by lab x at first valid frame)
+    obstacle_labels : list of str, OBSTACLE_L and OBSTACLE_R (L/R by lr_axis position)
     """
     n_points = points.shape[1]
     motion = motion_score_per_marker(points)
@@ -78,10 +82,11 @@ def detect_obstacle_markers(
     motion_cand[~np.isfinite(motion_cand)] = np.inf
     order = np.argsort(motion_cand)
     selected_candidates = candidates[order[:n_obstacle]]
-    # Assign OBSTACLE_L and OBSTACLE_R by x position (first frame, or mean of valid)
-    x_pos = np.nanmean(points[:, selected_candidates, 0], axis=0)
-    # Smaller x -> L, larger x -> R (adjust if your lab convention differs)
-    lr_order = np.argsort(x_pos)
+    # Assign OBSTACLE_L and OBSTACLE_R by position along lr_axis (0=x, 1=y)
+    axis_idx = 1 if str(lr_axis).strip().lower() == "y" else 0
+    pos = np.nanmean(points[:, selected_candidates, axis_idx], axis=0)
+    # Smaller position -> L, larger -> R
+    lr_order = np.argsort(pos)
     obstacle_labels_ordered = [OBSTACLE_LABELS[i] for i in lr_order]
     indices = list(selected_candidates[lr_order])
     label_names = [obstacle_labels_ordered[i] for i in range(n_obstacle)]

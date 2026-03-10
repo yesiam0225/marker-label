@@ -100,21 +100,60 @@ def run_viewer(
                 pass
 
     add_segment_meshes(points[0])
-    # Obstacle labels: find OBSTACLE_L / OBSTACLE_R indices and show only those
+    # Obstacle labels: find OBSTACLE_L / OBSTACLE_R indices; display as OBS1, OBS2
     label_stripped = [str(lab).strip() for lab in labels]
     obstacle_indices = []
-    obstacle_names = []
+    obstacle_display_names = []  # OBS1, OBS2 for viewer
     for name in ("OBSTACLE_L", "OBSTACLE_R"):
         try:
-            i = label_stripped.index(name)
+            i = next(ix for ix, s in enumerate(label_stripped) if str(s).strip().upper() == name.upper())
             obstacle_indices.append(i)
-            obstacle_names.append(name)
-        except ValueError:
+            obstacle_display_names.append("OBS1" if name == "OBSTACLE_L" else "OBS2")
+        except StopIteration:
+            pass
+    # Head labels: LFHD, RFHD, LBHD, RBHD
+    head_names_order = ("LFHD", "RFHD", "LBHD", "RBHD")
+    head_indices = []
+    head_names = []
+    for name in head_names_order:
+        try:
+            i = next(ix for ix, s in enumerate(label_stripped) if str(s).strip().upper() == name.upper())
+            head_indices.append(i)
+            head_names.append(labels[i].strip() if i < len(labels) else name)
+        except StopIteration:
+            pass
+    # C7 and shoulders: C7, LSHO, RSHO
+    c7_shoulder_order = ("C7", "LSHO", "RSHO")
+    c7_shoulder_indices = []
+    c7_shoulder_names = []
+    for name in c7_shoulder_order:
+        try:
+            i = next(ix for ix, s in enumerate(label_stripped) if str(s).strip().upper() == name.upper())
+            c7_shoulder_indices.append(i)
+            c7_shoulder_names.append(labels[i].strip() if i < len(labels) else name)
+        except StopIteration:
+            pass
+    # CLAV and RBAK
+    clav_rbak_order = ("CLAV", "RBAK")
+    clav_rbak_indices = []
+    clav_rbak_names = []
+    for name in clav_rbak_order:
+        try:
+            i = next(ix for ix, s in enumerate(label_stripped) if str(s).strip().upper() == name.upper())
+            clav_rbak_indices.append(i)
+            clav_rbak_names.append(labels[i].strip() if i < len(labels) else name)
+        except StopIteration:
             pass
     if background == "white":
         obs_text_color, obs_shape_color = "black", "lightgrey"
+        head_text_color, head_shape_color = "darkblue", "lavender"
+        c7_shoulder_text_color, c7_shoulder_shape_color = "darkgreen", "honeydew"
+        clav_rbak_text_color, clav_rbak_shape_color = "saddlebrown", "wheat"
     else:
         obs_text_color, obs_shape_color = "white", "dimgrey"
+        head_text_color, head_shape_color = "lightblue", "dimgrey"
+        c7_shoulder_text_color, c7_shoulder_shape_color = "lightgreen", "dimgrey"
+        clav_rbak_text_color, clav_rbak_shape_color = "wheat", "dimgrey"
 
     def add_obstacle_labels(f: int) -> None:
         try:
@@ -126,11 +165,11 @@ def run_viewer(
         pts_f = pts_display[f]
         obs_pts = pts_f[obstacle_indices]
         obs_cloud = pv.PolyData(obs_pts)
-        obs_cloud["names"] = np.array(obstacle_names, dtype="U")
+        obs_cloud["names"] = np.array(obstacle_display_names, dtype="U")
         plotter.add_point_labels(
             obs_cloud,
             "names",
-            font_size=10,
+            font_size=16,
             show_points=False,
             text_color=obs_text_color,
             shape_color=obs_shape_color,
@@ -139,8 +178,80 @@ def run_viewer(
             name="obstacle_labels",
         )
 
+    def add_head_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("head_labels")
+        except Exception:
+            pass
+        if not head_indices:
+            return
+        pts_f = pts_display[f]
+        head_pts = pts_f[head_indices]
+        head_cloud = pv.PolyData(head_pts)
+        head_cloud["names"] = np.array(head_names, dtype="U")
+        plotter.add_point_labels(
+            head_cloud,
+            "names",
+            font_size=14,
+            show_points=False,
+            text_color=head_text_color,
+            shape_color=head_shape_color,
+            shape_opacity=0.85,
+            always_visible=True,
+            name="head_labels",
+        )
+
+    def add_c7_shoulder_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("c7_shoulder_labels")
+        except Exception:
+            pass
+        if not c7_shoulder_indices:
+            return
+        pts_f = pts_display[f]
+        c7_pts = pts_f[c7_shoulder_indices]
+        c7_cloud = pv.PolyData(c7_pts)
+        c7_cloud["names"] = np.array(c7_shoulder_names, dtype="U")
+        plotter.add_point_labels(
+            c7_cloud,
+            "names",
+            font_size=14,
+            show_points=False,
+            text_color=c7_shoulder_text_color,
+            shape_color=c7_shoulder_shape_color,
+            shape_opacity=0.85,
+            always_visible=True,
+            name="c7_shoulder_labels",
+        )
+
+    def add_clav_rbak_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("clav_rbak_labels")
+        except Exception:
+            pass
+        if not clav_rbak_indices:
+            return
+        pts_f = pts_display[f]
+        clav_pts = pts_f[clav_rbak_indices]
+        clav_cloud = pv.PolyData(clav_pts)
+        clav_cloud["names"] = np.array(clav_rbak_names, dtype="U")
+        plotter.add_point_labels(
+            clav_cloud,
+            "names",
+            font_size=14,
+            show_points=False,
+            text_color=clav_rbak_text_color,
+            shape_color=clav_rbak_shape_color,
+            shape_opacity=0.85,
+            always_visible=True,
+            name="clav_rbak_labels",
+        )
+
     add_obstacle_labels(0)
-    plotter.add_text(f"Frame 0 / {n_frames}  (rate: {rate:.1f} Hz)", font_size=10, name="frame_text")
+    add_head_labels(0)
+    add_c7_shoulder_labels(0)
+    add_clav_rbak_labels(0)
+    plotter.add_text(f"Frame 0 / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
 
     # Shared state: current frame index, playing flag, optional slider widget
     frame_idx = [0]
@@ -156,7 +267,10 @@ def run_viewer(
         remove_segment_meshes()
         add_segment_meshes(points[f])
         add_obstacle_labels(f)
-        plotter.add_text(f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)", font_size=10, name="frame_text")
+        add_head_labels(f)
+        add_c7_shoulder_labels(f)
+        add_clav_rbak_labels(f)
+        plotter.add_text(f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
         if slider_widget[0] is not None:
             try:
                 slider_widget[0].GetRepresentation().SetValue(f)
