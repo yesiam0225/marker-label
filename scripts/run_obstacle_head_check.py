@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Run the pipeline (screening → obstacle → head → C7/shoulders by Z, then Z-band),
-then export obstacle + head + C7 + shoulders + CLAV + RBAK + STRN + T10 + arm + pelvis + arm/hand (29 markers) and open the QC viewer.
+then export obstacle + head + C7 + shoulders + CLAV + RBAK + STRN + T10 + arm + pelvis + arm/hand + leg/foot (41 markers) and open the QC viewer.
 
 Usage:
   python scripts/run_obstacle_head_check.py <static.c3d> <dynamic.c3d> -o <out_prefix> [--no-viewer]
@@ -22,16 +22,17 @@ from marker_label.constants import (
     CLAV_RBAK_MARKERS,
     STRN_T10_ARM_MARKERS,
     PELVIS_ARM12_MARKERS,
+    LEG_FOOT12_MARKERS,
 )
 from marker_label.pipeline import run_pipeline
 from marker_label.inspect_quality import load_labeled_csv
 from marker_label.export import export_csv
 from marker_label.io import save_c3d
 
-# Obstacle + head + C7 + shoulders + CLAV + RBAK + STRN + T10 + arm + pelvis + arm/hand (29 markers)
-OBSTACLE_HEAD_29 = (
+# Obstacle + head + C7 + shoulders + CLAV + RBAK + STRN + T10 + arm + pelvis + arm/hand + leg/foot (41 markers)
+OBSTACLE_HEAD_41 = (
     list(OBSTACLE_LABELS) + list(HEAD_MARKERS) + list(C7_SHOULDER_MARKERS)
-    + list(CLAV_RBAK_MARKERS) + list(STRN_T10_ARM_MARKERS) + list(PELVIS_ARM12_MARKERS)
+    + list(CLAV_RBAK_MARKERS) + list(STRN_T10_ARM_MARKERS) + list(PELVIS_ARM12_MARKERS) + list(LEG_FOOT12_MARKERS)
 )
 
 
@@ -72,11 +73,11 @@ def extract_obstacle_head_from_labeled_csv(
     rate: float = 0.0,
     first_frame: int = 1,
 ) -> None:
-    """Export obstacle + head + C7 + shoulders + CLAV + RBAK + STRN/T10/arm + pelvis/arm12 (29 markers) from full labeled CSV."""
+    """Export obstacle + head + C7 + shoulders + CLAV + RBAK + STRN/T10/arm + pelvis/arm12 + leg/foot (41 markers) from full labeled CSV."""
     extract_subset_from_labeled_csv(
         full_csv_path,
         f"{out_prefix}_obstacle_head_c7_shoulders_labeled",
-        OBSTACLE_HEAD_29,
+        OBSTACLE_HEAD_41,
         rate=rate,
         first_frame=first_frame,
     )

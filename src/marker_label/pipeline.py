@@ -217,7 +217,7 @@ def run_pipeline(
             points_d_body_for_matching = points_d_body @ R.T  # (n_frames, n_pts, 3)
 
     # 3) Body labeling: head by top-4-Z + L/R/A/P at best frame; rest by no-arm-hand Z-band
-    labels_body_out, label_per_frame = label_body_markers(
+    labels_body_out, label_per_frame, best_frame = label_body_markers(
         points_d_body_for_matching,
         template_39 if template_39 else template_body,
         residual_dynamic=residual_d_body,
@@ -233,6 +233,8 @@ def run_pipeline(
         d_back_xy=d_back,
         d_right_xy=d_right,
     )
+
+    print(f"Best frame for labeling: {best_frame} (0-based index; 1-based frame = {best_frame + 1})")
 
     # 4) Build full output: body (static order) + obstacle
     if points_obstacle.shape[1] < 2:
@@ -271,4 +273,5 @@ def run_pipeline(
         "n_frames": points_full.shape[0],
         "n_markers": points_full.shape[1],
         "z_band_no_arm_hand_path": z_band_no_arm_hand_path if label_to_band_no_arm_hand else None,
+        "best_frame": best_frame,
     }

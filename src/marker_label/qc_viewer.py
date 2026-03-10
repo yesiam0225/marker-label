@@ -166,6 +166,16 @@ def run_viewer(
             pelvis_arm12_names.append(labels[i].strip() if i < len(labels) else name)
         except StopIteration:
             pass
+    leg_foot12_order = ("LTHI", "RTHI", "LKNE", "RKNE", "LTIB", "RTIB", "LANK", "RANK", "LHEE", "LTOE", "RHEE", "RTOE")
+    leg_foot12_indices = []
+    leg_foot12_names = []
+    for name in leg_foot12_order:
+        try:
+            i = next(ix for ix, s in enumerate(label_stripped) if str(s).strip().upper() == name.upper())
+            leg_foot12_indices.append(i)
+            leg_foot12_names.append(labels[i].strip() if i < len(labels) else name)
+        except StopIteration:
+            pass
     if background == "white":
         obs_text_color, obs_shape_color = "black", "lightgrey"
         head_text_color, head_shape_color = "darkblue", "lavender"
@@ -173,6 +183,7 @@ def run_viewer(
         clav_rbak_text_color, clav_rbak_shape_color = "saddlebrown", "wheat"
         strn_t10_arm_text_color, strn_t10_arm_shape_color = "darkcyan", "azure"
         pelvis_arm12_text_color, pelvis_arm12_shape_color = "purple", "plum"
+        leg_foot12_text_color, leg_foot12_shape_color = "darkgreen", "honeydew"
     else:
         obs_text_color, obs_shape_color = "white", "dimgrey"
         head_text_color, head_shape_color = "lightblue", "dimgrey"
@@ -180,6 +191,7 @@ def run_viewer(
         clav_rbak_text_color, clav_rbak_shape_color = "wheat", "dimgrey"
         strn_t10_arm_text_color, strn_t10_arm_shape_color = "cyan", "dimgrey"
         pelvis_arm12_text_color, pelvis_arm12_shape_color = "magenta", "dimgrey"
+        leg_foot12_text_color, leg_foot12_shape_color = "lightgreen", "dimgrey"
 
     def add_obstacle_labels(f: int) -> None:
         try:
@@ -319,12 +331,36 @@ def run_viewer(
             name="pelvis_arm12_labels",
         )
 
+    def add_leg_foot12_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("leg_foot12_labels")
+        except Exception:
+            pass
+        if not leg_foot12_indices:
+            return
+        pts_f = pts_display[f]
+        lf_pts = pts_f[leg_foot12_indices]
+        lf_cloud = pv.PolyData(lf_pts)
+        lf_cloud["names"] = np.array(leg_foot12_names, dtype="U")
+        plotter.add_point_labels(
+            lf_cloud,
+            "names",
+            font_size=11,
+            show_points=False,
+            text_color=leg_foot12_text_color,
+            shape_color=leg_foot12_shape_color,
+            shape_opacity=0.85,
+            always_visible=True,
+            name="leg_foot12_labels",
+        )
+
     add_obstacle_labels(0)
     add_head_labels(0)
     add_c7_shoulder_labels(0)
     add_clav_rbak_labels(0)
     add_strn_t10_arm_labels(0)
     add_pelvis_arm12_labels(0)
+    add_leg_foot12_labels(0)
     plotter.add_text(f"Frame 0 / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
 
     # Shared state: current frame index, playing flag, optional slider widget
@@ -346,6 +382,7 @@ def run_viewer(
         add_clav_rbak_labels(f)
         add_strn_t10_arm_labels(f)
         add_pelvis_arm12_labels(f)
+        add_leg_foot12_labels(f)
         plotter.add_text(f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
         if slider_widget[0] is not None:
             try:
