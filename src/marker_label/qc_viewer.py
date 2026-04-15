@@ -40,9 +40,11 @@ def run_viewer(
     background: str = "white",
     segment_color: str = "darkblue",
     scale_factor: float = 1.0,
+    label_font_size: float = 18.0,
 ) -> None:
     """
     Open PyVista window: 3D markers and body segments (sticks), play/stop/back/forward.
+    Zoom: use the "Zoom +" / "Zoom -" buttons or keys '+'/=' (zoom in) and '-' (zoom out).
 
     Segments are defined in marker_label.segments: each segment is an ordered list
     of marker names; consecutive pairs are drawn as lines (see segments.SEGMENTS).
@@ -55,6 +57,7 @@ def run_viewer(
     background : 'white' or 'black'
     segment_color : color of segment lines (default 'darkblue')
     scale_factor : multiply coordinates by this (e.g. 1000 if file is in meters and you want to display as mm).
+    label_font_size : font size for point labels (default 18). Use --font-size in CLI to override.
     """
     from .segments import segment_lines_for_frame_by_segment, SEGMENT_COLORS, SEGMENTS
 
@@ -62,6 +65,14 @@ def run_viewer(
     n_frames, n_markers, _ = points.shape
     if n_frames == 0 or n_markers == 0:
         raise ValueError("No data to display.")
+    # Optional best-frame file (e.g. written by export_pre_clav_for_viewer)
+    best_frame_1based: int | None = None
+    bestframe_path = Path(path).with_suffix(Path(path).suffix + ".bestframe")
+    if bestframe_path.exists():
+        try:
+            best_frame_1based = int(bestframe_path.read_text().strip().split()[0])
+        except (ValueError, IndexError, OSError):
+            pass
     # Replace NaN with 0 for display (markers)
     pts_display = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
     # Frame interval in ms for timer
@@ -176,6 +187,11 @@ def run_viewer(
             leg_foot12_names.append(labels[i].strip() if i < len(labels) else name)
         except StopIteration:
             pass
+    # Points not in any anatomical group (e.g. unlabeled / pre-CLAV indices "0", "1", "2", ...)
+    known_indices = set(obstacle_indices + head_indices + c7_shoulder_indices + clav_rbak_indices
+                        + strn_t10_arm_indices + pelvis_arm12_indices + leg_foot12_indices)
+    other_indices = [i for i in range(len(labels)) if i not in known_indices]
+    other_names = [labels[i].strip() if i < len(labels) else str(i) for i in other_indices]
     if background == "white":
         obs_text_color, obs_shape_color = "black", "lightgrey"
         head_text_color, head_shape_color = "darkblue", "lavender"
@@ -207,7 +223,7 @@ def run_viewer(
         plotter.add_point_labels(
             obs_cloud,
             "names",
-            font_size=16,
+            font_size=int(label_font_size + 2),
             show_points=False,
             text_color=obs_text_color,
             shape_color=obs_shape_color,
@@ -230,7 +246,7 @@ def run_viewer(
         plotter.add_point_labels(
             head_cloud,
             "names",
-            font_size=14,
+            font_size=int(label_font_size),
             show_points=False,
             text_color=head_text_color,
             shape_color=head_shape_color,
@@ -253,7 +269,7 @@ def run_viewer(
         plotter.add_point_labels(
             c7_cloud,
             "names",
-            font_size=14,
+            font_size=int(label_font_size),
             show_points=False,
             text_color=c7_shoulder_text_color,
             shape_color=c7_shoulder_shape_color,
@@ -276,7 +292,7 @@ def run_viewer(
         plotter.add_point_labels(
             clav_cloud,
             "names",
-            font_size=14,
+            font_size=int(label_font_size),
             show_points=False,
             text_color=clav_rbak_text_color,
             shape_color=clav_rbak_shape_color,
@@ -299,7 +315,7 @@ def run_viewer(
         plotter.add_point_labels(
             arm_cloud,
             "names",
-            font_size=14,
+            font_size=int(label_font_size),
             show_points=False,
             text_color=strn_t10_arm_text_color,
             shape_color=strn_t10_arm_shape_color,
@@ -322,7 +338,7 @@ def run_viewer(
         plotter.add_point_labels(
             pa_cloud,
             "names",
-            font_size=12,
+            font_size=int(label_font_size - 2),
             show_points=False,
             text_color=pelvis_arm12_text_color,
             shape_color=pelvis_arm12_shape_color,
@@ -345,7 +361,7 @@ def run_viewer(
         plotter.add_point_labels(
             lf_cloud,
             "names",
-            font_size=11,
+            font_size=int(label_font_size - 3),
             show_points=False,
             text_color=leg_foot12_text_color,
             shape_color=leg_foot12_shape_color,
@@ -354,6 +370,37 @@ def run_viewer(
             name="leg_foot12_labels",
         )
 
+    def add_other_labels(f: int) -> None:
+        try:
+            plotter.remove_actor("other_labels")
+        except Exception:
+            pass
+        if not other_indices:
+            return
+        pts_f = pts_display[f]
+        other_pts = pts_f[other_indices]
+        other_cloud = pv.PolyData(other_pts)
+        other_cloud["names"] = np.array(other_names, dtype="U")
+        _text = "grey" if background == "white" else "lightgrey"
+        _shape = "lightgrey" if background == "white" else "dimgrey"
+        plotter.add_point_labels(
+            other_cloud,
+            "names",
+            font_size=int(label_font_size - 4),
+            show_points=False,
+            text_color=_text,
+            shape_color=_shape,
+            shape_opacity=0.85,
+            always_visible=True,
+            name="other_labels",
+        )
+
+    def frame_text_str(f: int) -> str:
+        base = f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)"
+        if best_frame_1based is not None:
+            base += f"  Best frame: {best_frame_1based}"
+        return base
+
     add_obstacle_labels(0)
     add_head_labels(0)
     add_c7_shoulder_labels(0)
@@ -361,7 +408,8 @@ def run_viewer(
     add_strn_t10_arm_labels(0)
     add_pelvis_arm12_labels(0)
     add_leg_foot12_labels(0)
-    plotter.add_text(f"Frame 0 / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
+    add_other_labels(0)
+    plotter.add_text(frame_text_str(0), font_size=12, name="frame_text")
 
     # Shared state: current frame index, playing flag, optional slider widget
     frame_idx = [0]
@@ -383,7 +431,8 @@ def run_viewer(
         add_strn_t10_arm_labels(f)
         add_pelvis_arm12_labels(f)
         add_leg_foot12_labels(f)
-        plotter.add_text(f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)", font_size=12, name="frame_text")
+        add_other_labels(f)
+        plotter.add_text(frame_text_str(f), font_size=12, name="frame_text")
         if slider_widget[0] is not None:
             try:
                 slider_widget[0].GetRepresentation().SetValue(f)
@@ -415,6 +464,16 @@ def run_viewer(
     def on_forward(_checked: bool) -> None:
         set_frame(min(n_frames - 1, frame_idx[0] + 1))
         playing[0] = False
+
+    _ZOOM_FACTOR = 1.25
+
+    def zoom_in() -> None:
+        plotter.zoom_camera(_ZOOM_FACTOR)
+        plotter.update()
+
+    def zoom_out() -> None:
+        plotter.zoom_camera(1.0 / _ZOOM_FACTOR)
+        plotter.update()
 
     # Frame slider (top): scrub through frames
     rng = (0, max(0, n_frames - 1))
@@ -480,6 +539,36 @@ def run_viewer(
         background_color="white",
     )
     plotter.add_text(">>", position=(x + 8, btn_y + btn_size + 2), font_size=9, name="label_fwd")
+    x += btn_size + 8
+    # Zoom In / Zoom Out buttons
+    plotter.add_checkbox_button_widget(
+        lambda _: zoom_in(),
+        value=False,
+        position=(x, btn_y),
+        size=btn_size,
+        border_size=4,
+        color_on="blue",
+        color_off="grey",
+        background_color="white",
+    )
+    plotter.add_text("Zoom +", position=(x, btn_y + btn_size + 2), font_size=9, name="label_zoom_in")
+    x += btn_size + 8
+    plotter.add_checkbox_button_widget(
+        lambda _: zoom_out(),
+        value=False,
+        position=(x, btn_y),
+        size=btn_size,
+        border_size=4,
+        color_on="blue",
+        color_off="grey",
+        background_color="white",
+    )
+    plotter.add_text("Zoom -", position=(x, btn_y + btn_size + 2), font_size=9, name="label_zoom_out")
+
+    # Keyboard: +/= zoom in, - zoom out
+    plotter.add_key_event("=", zoom_in)
+    plotter.add_key_event("+", zoom_in)
+    plotter.add_key_event("-", zoom_out)
 
     plotter.add_timer_event(max_steps=10**9, duration=dt_ms, callback=on_timer)
     plotter.show()
@@ -588,6 +677,16 @@ def run_compare_viewer(
             pointb=(0.75, 0.92),
         )
         slider_widget[0] = sw
+    # Zoom keys for compare viewer
+    def _zoom_in() -> None:
+        plotter.zoom_camera(1.25)
+        plotter.update()
+    def _zoom_out() -> None:
+        plotter.zoom_camera(1.0 / 1.25)
+        plotter.update()
+    plotter.add_key_event("equal", _zoom_in)
+    plotter.add_key_event("plus", _zoom_in)
+    plotter.add_key_event("minus", _zoom_out)
     plotter.show()
 
 
@@ -597,6 +696,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="3D viewer for labeled C3D/CSV with segments (PyVista).")
     parser.add_argument("file", help="Labeled .c3d or labeled .csv file")
     parser.add_argument("--point-size", type=float, default=12.0, help="Marker size (default 12)")
+    parser.add_argument("--font-size", type=float, default=18.0, metavar="SIZE", help="Point label font size (default 18)")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier (default 1)")
     parser.add_argument("--background", choices=("white", "black"), default="white", help="Background color")
     parser.add_argument("--segment-color", default="darkblue", help="Color of segment lines (default darkblue)")
@@ -609,6 +709,7 @@ def main() -> None:
         background=args.background,
         segment_color=args.segment_color,
         scale_factor=args.scale,
+        label_font_size=args.font_size,
     )
 
 

@@ -68,11 +68,20 @@ DEFAULT_MIDDLE_END = 0.80
 # Dynamic trial initial screening (see docs/DYNAMIC_TRIAL_INITIAL_SCREENING_PLAN.md)
 SCREENING_Y_MIN_MM = -1500
 SCREENING_Y_MAX_MM = 1500
+# Step 1 (Y range): drop column if too few finite-Y frames, or if fraction of finite-Y
+# frames with Y outside [y_min, y_max] exceeds this (denominator = count of finite Y).
+SCREENING_Y_MIN_FINITE_FRAMES = 5
+SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD = 0.9
 SCREENING_VISIBILITY_MIN = 0.50  # Step 2: drop columns with visibility < this
 # Expected marker count after screening: 39 body + 2 obstacles (raise if different)
 EXPECTED_SCREENED_MARKERS = 41  # 39 body + 2 obstacles
 SCREENING_BEST_FRAME_VISIBILITY_MIN = 0.95  # Step 5: frame must have >= this fraction valid
 SCREENING_FOOT_PROXY_N_SMALLEST_Z = 6  # Step 5: mean of N smallest Z as foot-height proxy
+
+# Unlabeled body columns in labeled CSV/C3D: display string is
+# (0-based loaded column index) + UNLABELED_NUMERIC_LABEL_BASE. Base 1 matches typical
+# 1-based marker numbering in capture software; use 0 for raw 0-based indices.
+UNLABELED_NUMERIC_LABEL_BASE = 1
 
 # Head markers (4): assigned at best frame by top 4 Z and L/R (Y), A/P (X).
 HEAD_MARKERS = ("LFHD", "RFHD", "LBHD", "RBHD")
@@ -81,6 +90,8 @@ HEAD_MARKERS_SET = frozenset(m.upper() for m in HEAD_MARKERS)
 # C7 and shoulders: assigned after head; among remaining points, top 1 Z = C7, next 2 Z = LSHO/RSHO (L/R by Y).
 C7_SHOULDER_MARKERS = ("C7", "LSHO", "RSHO")
 C7_SHOULDER_MARKERS_SET = frozenset(m.upper() for m in C7_SHOULDER_MARKERS)
+# C7/shoulder validation: C7 must be between shoulders in Y
+C7_SHOULDER_NOT_BETWEEN = "C7_NOT_BETWEEN_SHOULDERS"
 
 # CLAV and RBAK: after C7/shoulders; next 2 Z among points with Y between shoulders ± offset; anterior = CLAV, posterior = RBAK.
 CLAV_RBAK_MARKERS = ("CLAV", "RBAK")

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Sequence
+
 import numpy as np
 
 from .io import save_c3d
-from .constants import OBSTACLE_LABELS
+from .constants import OBSTACLE_LABELS, UNLABELED_NUMERIC_LABEL_BASE
 
 
 def build_full_trajectory_matrix(
@@ -15,12 +17,23 @@ def build_full_trajectory_matrix(
     label_per_frame_body: np.ndarray,
     points_obstacle: np.ndarray,
     obstacle_labels: list[str],
+    *,
+    loaded_indices_for_body: Sequence[int] | None = None,
+    reference_frame: int = 0,
+    unlabeled_numeric_base: int | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """
     Build (n_frames, n_markers, 3) and full label list: body (static order) + obstacle.
 
     Body markers missing in dynamic get NaN trajectory. Obstacle trajectories
     are appended.
+
+    When ``loaded_indices_for_body`` is set, any body point with no anatomical label
+    at ``reference_frame`` (empty string in ``label_per_frame_body``) is appended as an
+    extra column whose name is ``str(loaded_indices_for_body[pi] + base)`` where ``base`` is
+    ``unlabeled_numeric_base`` or ``UNLABELED_NUMERIC_LABEL_BASE`` (default 1: 1-based display
+    to match common unlabeled-trial viewers). The underlying index is still 0-based in the
+    loaded C3D (before initial screening). Sorted by loaded 0-based index for stable export.
 
     Parameters
     ----------
@@ -29,13 +42,17 @@ def build_full_trajectory_matrix(
     label_per_frame_body : (n_frames, n_body_points) object array, label per point per frame
     points_obstacle : (n_frames, 2, 3) obstacle marker trajectories
     obstacle_labels : [OBSTACLE_L, OBSTACLE_R] or similar
+    loaded_indices_for_body : length n_body; loaded-file column index per body column.
+    reference_frame : frame used to detect unlabeled points (typically best labeling frame).
+    unlabeled_numeric_base : added to loaded 0-based index for display (None = use constant).
 
     Returns
     -------
-    points : (n_frames, n_body + 2, 3)
-    labels : body_labels_static + obstacle_labels
+    points : (n_frames, n_markers, 3)
+    labels : body_labels_static + obstacle_labels + optional numeric strings
     """
     n_frames = points_dynamic_body.shape[0]
+    n_body = points_dynamic_body.shape[1]
     n_body_labels = len(body_labels_static)
     n_out = n_body_labels + len(obstacle_labels)
     points_out = np.full((n_frames, n_out, 3), np.nan)
@@ -48,6 +65,36 @@ def build_full_trajectory_matrix(
     for oi, lab in enumerate(obstacle_labels):
         points_out[:, n_body_labels + oi, :] = points_obstacle[:, oi, :]
     labels_out = list(body_labels_static) + list(obstacle_labels)
+
+    if loaded_indices_for_body is not None:
+        if len(loaded_indices_for_body) != n_body:
+            raise ValueError(
+                f"loaded_indices_for_body length {len(loaded_indices_for_body)} "
+                f"!= n_body {n_body}",
+            )
+        ref = max(0, min(n_frames - 1, int(reference_frame)))
+        unlabeled_pi: list[int] = []
+        for pi in range(n_body):
+            lab = label_per_frame_body[ref, pi]
+            s = str(lab).strip() if lab is not None else ""
+            if s == "":
+                unlabeled_pi.append(pi)
+        unlabeled_pi.sort(key=lambda i: int(loaded_indices_for_body[i]))
+        if unlabeled_pi:
+            base = (
+                UNLABELED_NUMERIC_LABEL_BASE
+                if unlabeled_numeric_base is None
+                else int(unlabeled_numeric_base)
+            )
+            extra = np.stack(
+                [points_dynamic_body[:, pi, :] for pi in unlabeled_pi],
+                axis=1,
+            )
+            points_out = np.concatenate([points_out, extra], axis=1)
+            labels_out.extend(
+                str(int(loaded_indices_for_body[pi]) + base) for pi in unlabeled_pi
+            )
+
     return points_out, labels_out
 
 

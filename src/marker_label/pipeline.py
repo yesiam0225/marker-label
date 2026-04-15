@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+
 import numpy as np
 
 from .io import load_c3d
@@ -12,11 +14,15 @@ from .constants import (
     WHOLE_BODY_39_SET,
     Z_BAND_SIZES_NO_ARM_HAND,
     EXPECTED_SCREENED_MARKERS,
+    SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD,
+    SCREENING_Y_MIN_FINITE_FRAMES,
+    UNLABELED_NUMERIC_LABEL_BASE,
 )
 from .screening import (
     apply_initial_screening_steps_1_and_2,
     compute_walking_direction_x,
     get_lr_ap_axes_from_walking,
+    loaded_point_indices_for_body,
     ScreeningError,
 )
 from .obstacle import detect_obstacle_markers
@@ -93,6 +99,12 @@ def run_pipeline(
     max_interp_frames: int = 10,
     require_obstacles: bool = False,
     check_screened_count: bool = True,
+    trim_first_frame: int | None = None,
+    trim_last_frame: int | None = None,
+    skip_visibility_screening: bool = False,
+    y_outside_fraction_threshold: float | None = None,
+    min_finite_y_frames: int | None = None,
+    unlabeled_numeric_base: int | None = None,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -120,6 +132,11 @@ def run_pipeline(
     check_screened_count : if True (default), raise ScreeningError (Step 2) when screened
         column count is not EXPECTED_SCREENED_MARKERS (41). Set False to run on trials
         with different channel count (e.g. for head-only check).
+    trim_first_frame, trim_last_frame : optional 1-based first/last frame to keep
+        (Step 1.5). If both set, trim dynamic to this range before visibility screening.
+    skip_visibility_screening : if True, skip Step 2 (do not drop columns by visibility).
+    y_outside_fraction_threshold, min_finite_y_frames : Step 1 Y screening; None uses defaults from constants.
+    unlabeled_numeric_base : added to loaded 0-based index for unlabeled marker names in export (None = constant).
 
     Returns
     -------
@@ -134,10 +151,30 @@ def run_pipeline(
     rate = dynamic.get("rate") or 0.0
     first_frame = dynamic.get("first_frame") or 1
 
-    # Dynamic trial initial screening (Steps 1–2): Y range ±1.5 m, then visibility ≥50%
-    points_d, residual_d, _keep_indices = apply_initial_screening_steps_1_and_2(
-        points_d, residual_d
+    _y_frac = (
+        SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD
+        if y_outside_fraction_threshold is None
+        else y_outside_fraction_threshold
     )
+    _y_min_fin = (
+        SCREENING_Y_MIN_FINITE_FRAMES
+        if min_finite_y_frames is None
+        else min_finite_y_frames
+    )
+
+    # Dynamic trial initial screening (Steps 1–1.5–2): Y range, optional trim, visibility
+    points_d, residual_d, screening_keep, frame_trim_start = apply_initial_screening_steps_1_and_2(
+        points_d, residual_d,
+        trim_first_frame=trim_first_frame,
+        trim_last_frame=trim_last_frame,
+        skip_visibility_step=skip_visibility_screening,
+        y_outside_fraction_threshold=_y_frac,
+        min_finite_y_frames=_y_min_fin,
+    )
+    if trim_first_frame is not None and trim_last_frame is not None:
+        first_frame = trim_first_frame
+    else:
+        first_frame = (first_frame or 1) + frame_trim_start
     n_screened = points_d.shape[1]
     if check_screened_count and n_screened != EXPECTED_SCREENED_MARKERS:
         if n_screened < EXPECTED_SCREENED_MARKERS:
@@ -182,6 +219,7 @@ def run_pipeline(
         points_d_body = points_d[:, keep, :]
         residual_d_body = residual_d[:, keep] if residual_d is not None else None
     else:
+        keep = list(range(points_d.shape[1]))
         points_d_body = points_d
         residual_d_body = residual_d
 
@@ -235,6 +273,13 @@ def run_pipeline(
     )
 
     print(f"Best frame for labeling: {best_frame} (0-based index; 1-based frame = {best_frame + 1})")
+    p_best = points_d_body_for_matching[best_frame]
+    n_finite_xyz_best = int(np.sum(np.isfinite(p_best).all(axis=1)))
+    n_body_cols = int(points_d_body.shape[1])
+    print(
+        f"At best frame: body marker columns (points to label) = {n_body_cols}; "
+        f"finite XYZ at that frame = {n_finite_xyz_best}."
+    )
 
     # 4) Build full output: body (static order) + obstacle
     if points_obstacle.shape[1] < 2:
@@ -244,12 +289,21 @@ def run_pipeline(
     obs_labels = ["OBSTACLE_L", "OBSTACLE_R"]
     if obstacle_indices and len(obstacle_labels) == 2:
         obs_labels = obstacle_labels
+    loaded_for_body = loaded_point_indices_for_body(screening_keep, keep)
+    _unlab_base = (
+        UNLABELED_NUMERIC_LABEL_BASE
+        if unlabeled_numeric_base is None
+        else unlabeled_numeric_base
+    )
     points_full, labels_full = build_full_trajectory_matrix(
         body_labels_static,
         points_d_body,
         label_per_frame,
         points_obstacle,
         obs_labels,
+        loaded_indices_for_body=loaded_for_body,
+        reference_frame=best_frame,
+        unlabeled_numeric_base=_unlab_base,
     )
 
     # 5) Export original + filled
@@ -263,6 +317,14 @@ def run_pipeline(
         max_interp_frames=max_interp_frames,
     )
 
+    # QC viewer reads ``<csv_path>.bestframe`` (1-based frame) next to the labeled CSV
+    try:
+        Path(f"{out_prefix}_labeled.csv").with_suffix(
+            Path(f"{out_prefix}_labeled.csv").suffix + ".bestframe"
+        ).write_text(str(best_frame + 1))
+    except OSError:
+        pass
+
     return {
         "static_labels": labels_s,
         "body_labels_static": body_labels_static,
@@ -274,4 +336,7 @@ def run_pipeline(
         "n_markers": points_full.shape[1],
         "z_band_no_arm_hand_path": z_band_no_arm_hand_path if label_to_band_no_arm_hand else None,
         "best_frame": best_frame,
+        "best_frame_1based": best_frame + 1,
+        "n_body_marker_columns": n_body_cols,
+        "n_finite_xyz_at_best_frame": n_finite_xyz_best,
     }

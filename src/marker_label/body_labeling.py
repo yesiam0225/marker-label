@@ -13,6 +13,7 @@ from .constants import (
     HEAD_MARKERS_SET,
     C7_SHOULDER_MARKERS,
     C7_SHOULDER_MARKERS_SET,
+    C7_SHOULDER_NOT_BETWEEN,
     CLAV_RBAK_MARKERS,
     CLAV_RBAK_MARKERS_SET,
     STRN_T10_ARM_MARKERS_SET,
@@ -38,10 +39,31 @@ CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE = "CLAV_OR_RBAK_OUTSIDE_SHOULDER_Y_RANGE"
 class CLAVRBAKValidationError(Exception):
     """Raised when CLAV/RBAK labeling fails validation (Y range or RBAK posterior/right of CLAV)."""
 
-    def __init__(self, error_code: str, message: str):
+    def __init__(self, error_code: str, message: str, clav_idx: int | None = None, rbak_idx: int | None = None):
         self.error_code = error_code
         self.message = message
+        self.clav_idx = clav_idx
+        self.rbak_idx = rbak_idx
         super().__init__(f"CLAV/RBAK validation failed ({error_code}): {message}")
+
+
+class C7ShoulderValidationError(Exception):
+    """Raised when C7/shoulder assignment fails validation (e.g. C7 not between shoulders)."""
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        c7_idx: int | None = None,
+        lsho_idx: int | None = None,
+        rsho_idx: int | None = None,
+    ):
+        self.error_code = error_code
+        self.message = message
+        self.c7_idx = c7_idx
+        self.lsho_idx = lsho_idx
+        self.rsho_idx = rsho_idx
+        super().__init__(f"C7/shoulder validation failed ({error_code}): {message}")
 
 
 def _trunk_labels_in_template(template: dict) -> list[str]:
@@ -120,20 +142,11 @@ def assign_c7_shoulders_after_head(
     template: dict,
 ) -> list[tuple[int, str]]:
     """
-    After head is assigned: among remaining points, sort by Z descending;
-    assign 1st = C7, 2nd and 3rd = LSHO/RSHO. L/R by direct Y comparison (no centroid):
-    when d_right_xy[1] < 0 (x increases during walking), larger Y = left; else smaller Y = left.
+    After head is assigned: take top 3 points by Z as candidates for C7, LSHO, RSHO.
+    Assign C7 = point with middle Y (between the other two); the other two = LSHO/RSHO by L/R.
+    Validate that C7 is between shoulders in Y; raise C7ShoulderValidationError if not.
 
-    Parameters
-    ----------
-    points_frame : (n_points, 3)
-    d_right_xy : (2,) xy unit vector toward subject's right (used only for L/R sign)
-    exclude_pt_indices : point indices already assigned (e.g. head)
-    template : dict label -> position; used to get actual label strings for C7, LSHO, RSHO
-
-    Returns
-    -------
-    assignments : list of (point_idx, label), length 0--3
+    L/R: when d_right_xy[1] < 0 (x increases during walking), larger Y = left; else smaller Y = left.
     """
     remaining = [i for i in range(points_frame.shape[0]) if i not in exclude_pt_indices]
     z = points_frame[:, 2]
@@ -144,26 +157,150 @@ def assign_c7_shoulders_after_head(
     top3 = [remaining[int(i)] for i in order_z if np.isfinite(points_frame[remaining[i], 2])]
     if len(top3) < 1:
         return []
-    # Template labels for C7, LSHO, RSHO (preserve case from template)
     label_c7 = next((lab for lab in template if str(lab).strip().upper() == "C7"), "C7")
     label_lsho = next((lab for lab in template if str(lab).strip().upper() == "LSHO"), "LSHO")
     label_rsho = next((lab for lab in template if str(lab).strip().upper() == "RSHO"), "RSHO")
-    out: list[tuple[int, str]] = []
-    out.append((top3[0], label_c7))
-    if len(top3) >= 3:
-        # L/R by direct Y comparison (no centroid): larger Y = left when d_right[1] < 0
-        y_sho = points_frame[top3[1:3], 1]
-        larger_y_is_left = d_right_xy[1] < 0
-        order_y = np.argsort(-y_sho) if larger_y_is_left else np.argsort(y_sho)
-        out.append((top3[1 + order_y[0]], label_lsho))
-        out.append((top3[1 + order_y[1]], label_rsho))
-    elif len(top3) == 2:
-        y_shoulder = points_frame[top3[1], 1]
-        y_c7 = points_frame[top3[0], 1]
-        larger_y_is_left = d_right_xy[1] < 0
-        is_left = (y_shoulder > y_c7) if larger_y_is_left else (y_shoulder < y_c7)
-        out.append((top3[1], label_lsho if is_left else label_rsho))
-    return out
+
+    if len(top3) < 3:
+        # Fallback: 1 or 2 points only — keep previous behavior (top=C7, next=one shoulder)
+        out: list[tuple[int, str]] = []
+        out.append((top3[0], label_c7))
+        if len(top3) == 2:
+            y_shoulder = points_frame[top3[1], 1]
+            y_c7 = points_frame[top3[0], 1]
+            larger_y_is_left = d_right_xy[1] < 0
+            is_left = (y_shoulder > y_c7) if larger_y_is_left else (y_shoulder < y_c7)
+            out.append((top3[1], label_lsho if is_left else label_rsho))
+        return out
+
+    # Three candidates: assign by Y — middle Y = C7, other two = LSHO/RSHO
+    y_vals = np.array([points_frame[i, 1] for i in top3])
+    order_y = np.argsort(y_vals)  # ascending: [0]=smallest Y, [1]=middle, [2]=largest Y
+    idx_mid = order_y[1]
+    idx_lo = order_y[0]
+    idx_hi = order_y[2]
+    c7_idx = top3[idx_mid]
+    larger_y_is_left = d_right_xy[1] < 0
+    if larger_y_is_left:
+        lsho_idx = top3[idx_hi]
+        rsho_idx = top3[idx_lo]
+    else:
+        lsho_idx = top3[idx_lo]
+        rsho_idx = top3[idx_hi]
+
+    y_c7 = points_frame[c7_idx, 1]
+    y_lsho = points_frame[lsho_idx, 1]
+    y_rsho = points_frame[rsho_idx, 1]
+    y_min = min(y_lsho, y_rsho)
+    y_max = max(y_lsho, y_rsho)
+    tol = 0.0
+    if y_c7 < y_min - tol or y_c7 > y_max + tol:
+        raise C7ShoulderValidationError(
+            C7_SHOULDER_NOT_BETWEEN,
+            f"C7 (point {c7_idx}, Y={y_c7:.1f}) is not between shoulders "
+            f"(LSHO Y={y_lsho:.1f}, RSHO Y={y_rsho:.1f}; expected Y in [{y_min:.1f}, {y_max:.1f}]).",
+            c7_idx=c7_idx, lsho_idx=lsho_idx, rsho_idx=rsho_idx,
+        )
+    return [(c7_idx, label_c7), (lsho_idx, label_lsho), (rsho_idx, label_rsho)]
+
+
+def run_labeling_until_before_clav(
+    points_dynamic: np.ndarray,
+    template: dict,
+    d_back_xy: np.ndarray,
+    d_right_xy: np.ndarray,
+    *,
+    residual_dynamic: np.ndarray | None = None,
+    middle_start: float = DEFAULT_MIDDLE_START,
+    middle_end: float = DEFAULT_MIDDLE_END,
+) -> tuple[int, list[tuple[int, str]], list[tuple[int, str]]]:
+    """
+    Run best-frame selection and head + C7/shoulder assignment only (stop before CLAV/RBAK).
+
+    Returns
+    -------
+    best_f : int, 0-based best frame index
+    head_assignments : list of (point_idx, label)
+    c7_shoulder_assignments : list of (point_idx, label)
+    """
+    trunk_labels = _trunk_labels_in_template(template)
+
+    def _fallback(pts: np.ndarray, **kw) -> int:
+        if len(trunk_labels) >= 3:
+            return best_frame_by_trunk_cost(
+                pts, template, residual_dynamic,
+                trunk_labels=trunk_labels,
+                **kw,
+            )
+        return best_frame_for_matching(pts, residual_dynamic, **kw)
+
+    best_f = best_frame_by_foot_stability(
+        points_dynamic,
+        middle_start=middle_start,
+        middle_end=middle_end,
+        fallback_fn=_fallback,
+    )
+
+    head_assignments: list[tuple[int, str]] = []
+    head_pt_set: set[int] = set()
+    if d_back_xy is not None and d_right_xy is not None and len(d_back_xy) == 2 and len(d_right_xy) == 2:
+        head_labels_ordered = [
+            lab for m in HEAD_MARKERS
+            for lab in template
+            if str(lab).strip().upper() == m
+        ]
+        head_assignments = assign_head_markers_by_top4_z(
+            points_dynamic[best_f],
+            d_back_xy,
+            d_right_xy,
+            head_labels=head_labels_ordered if head_labels_ordered else None,
+        )
+        head_pt_set = {pi for pi, _ in head_assignments}
+
+    c7_shoulder_assignments: list[tuple[int, str]] = []
+    if d_right_xy is not None and len(d_right_xy) == 2:
+        c7_shoulder_assignments = assign_c7_shoulders_after_head(
+            points_dynamic[best_f],
+            d_right_xy,
+            head_pt_set,
+            template,
+        )
+
+    return best_f, head_assignments, c7_shoulder_assignments
+
+
+def get_clav_rbak_candidate_indices(
+    points_frame: np.ndarray,
+    exclude_pt_indices: set[int],
+    lsho_idx: int,
+    rsho_idx: int,
+) -> tuple[int | None, int | None]:
+    """
+    Return the point indices that would be chosen as CLAV (highest Z) and RBAK (next highest Z)
+    among points with Y between the two shoulders. Does not validate; use for reporting/debug.
+
+    Returns
+    -------
+    (clav_idx, rbak_idx) or (None, None) if fewer than 2 candidates.
+    """
+    y_lsho = points_frame[lsho_idx, 1]
+    y_rsho = points_frame[rsho_idx, 1]
+    if not (np.isfinite(y_lsho) and np.isfinite(y_rsho)):
+        return None, None
+    y_min = min(y_lsho, y_rsho)
+    y_max = max(y_lsho, y_rsho)
+    remaining = [
+        i for i in range(points_frame.shape[0])
+        if i not in exclude_pt_indices
+        and np.isfinite(points_frame[i, 2])
+        and y_min <= points_frame[i, 1] <= y_max
+    ]
+    if len(remaining) < 2:
+        return (remaining[0], None) if len(remaining) == 1 else (None, None)
+    z_vals = np.array([points_frame[i, 2] for i in remaining])
+    order_z = np.argsort(-z_vals)[:2]
+    top2 = [remaining[int(i)] for i in order_z]
+    return top2[0], top2[1]
 
 
 def assign_clav_rbak_after_c7_shoulders(
@@ -233,11 +370,13 @@ def assign_clav_rbak_after_c7_shoulders(
         raise CLAVRBAKValidationError(
             CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE,
             f"CLAV Y={clav_pt[1]:.1f} outside shoulder Y range [{y_min:.1f}, {y_max:.1f}].",
+            clav_idx=clav_idx, rbak_idx=rbak_idx,
         )
     if rbak_pt[1] < y_min or rbak_pt[1] > y_max:
         raise CLAVRBAKValidationError(
             CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE,
             f"RBAK Y={rbak_pt[1]:.1f} outside shoulder Y range [{y_min:.1f}, {y_max:.1f}].",
+            clav_idx=clav_idx, rbak_idx=rbak_idx,
         )
     xy_clav = np.asarray(clav_pt[:2], dtype=np.float64)
     xy_rbak = np.asarray(rbak_pt[:2], dtype=np.float64)
@@ -252,11 +391,13 @@ def assign_clav_rbak_after_c7_shoulders(
         raise CLAVRBAKValidationError(
             CLAVRBAK_RBAK_NOT_POSTERIOR_TO_CLAV,
             f"RBAK dot_back={dot_back_rbak:.2f} not > CLAV dot_back={dot_back_clav:.2f} (RBAK must be posterior to CLAV).",
+            clav_idx=clav_idx, rbak_idx=rbak_idx,
         )
     if dot_right_rbak <= dot_right_clav:
         raise CLAVRBAKValidationError(
             CLAVRBAK_RBAK_NOT_RIGHT_OF_CLAV,
             f"RBAK dot_right={dot_right_rbak:.2f} not > CLAV dot_right={dot_right_clav:.2f} (RBAK must be right of CLAV).",
+            clav_idx=clav_idx, rbak_idx=rbak_idx,
         )
     out.append((clav_idx, label_clav))
     out.append((rbak_idx, label_rbak))

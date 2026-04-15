@@ -88,6 +88,47 @@ def main() -> None:
         metavar="JSON",
         help="Use reference analysis JSON (from marker-label-analyze -o) to set best-frame window and optional distance thresholds.",
     )
+    parser.add_argument(
+        "--no-check-screened-count",
+        action="store_true",
+        help="Do not require exactly 41 columns after screening (use for trials with different channel count).",
+    )
+    parser.add_argument(
+        "--first-frame",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Step 1.5: first frame to keep (1-based). Use with --last-frame to trim trial range.",
+    )
+    parser.add_argument(
+        "--last-frame",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Step 1.5: last frame to keep (1-based). Use with --first-frame to trim trial range.",
+    )
+    parser.add_argument(
+        "--y-outside-fraction",
+        type=float,
+        default=None,
+        metavar="F",
+        help="Step 1: drop column if (finite Y outside band) / (finite Y frames) > F (default: from constants, 0.9).",
+    )
+    parser.add_argument(
+        "--min-finite-y-frames",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Step 1: drop column if count of frames with finite Y < N (default: from constants, 5).",
+    )
+    parser.add_argument(
+        "--unlabeled-label-base",
+        type=int,
+        default=None,
+        choices=(0, 1),
+        metavar="B",
+        help="Unlabeled marker names: display (loaded 0-based index) + B (default: from constants, 1 = 1-based).",
+    )
     args = parser.parse_args()
     out_prefix = args.output
     if out_prefix is None:
@@ -133,13 +174,31 @@ def main() -> None:
             max_propagation_distance=max_propagation_distance,
             export_filled=not args.no_filled,
             max_interp_frames=args.max_interp_frames,
+            check_screened_count=not args.no_check_screened_count,
+            trim_first_frame=args.first_frame,
+            trim_last_frame=args.last_frame,
+            skip_visibility_screening=False,
+            y_outside_fraction_threshold=args.y_outside_fraction,
+            min_finite_y_frames=args.min_finite_y_frames,
+            unlabeled_numeric_base=args.unlabeled_label_base,
         )
         print(f"Labeled {info['n_markers']} markers, {info['n_frames']} frames.")
+        if "best_frame_1based" in info:
+            print(
+                f"Best frame (for review): 1-based = {info['best_frame_1based']}, "
+                f"body columns = {info['n_body_marker_columns']}, "
+                f"finite XYZ at best frame = {info['n_finite_xyz_at_best_frame']}."
+            )
         print(f"Output: {out_prefix}_labeled.c3d, {out_prefix}_labeled.csv")
         if not args.no_filled:
             print(f"Filled: {out_prefix}_labeled_filled.c3d, {out_prefix}_labeled_filled.csv")
     except Exception as e:
+        from .body_labeling import CLAVRBAKValidationError, C7ShoulderValidationError
         print(f"Error: {e}", file=sys.stderr)
+        if isinstance(e, CLAVRBAKValidationError) and (e.clav_idx is not None or e.rbak_idx is not None):
+            print(f"Points tried as CLAV: index {e.clav_idx}, RBAK: index {e.rbak_idx}", file=sys.stderr)
+        if isinstance(e, C7ShoulderValidationError) and (e.c7_idx is not None or e.lsho_idx is not None or e.rsho_idx is not None):
+            print(f"C7/shoulder indices: C7={e.c7_idx}, LSHO={e.lsho_idx}, RSHO={e.rsho_idx}", file=sys.stderr)
         sys.exit(1)
 
 
