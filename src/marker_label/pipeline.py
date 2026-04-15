@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,40 @@ from .export import build_full_trajectory_matrix, export_labeled
 
 # Facing axis: subject's forward direction in lab (z = up). Used to align dynamic to static.
 FACING_AXIS_OPTIONS = ("x", "-x", "y", "-y")
+
+
+def apply_drop_loaded_column_indices_to_c3d_dict(
+    data: dict,
+    drop_indices: Sequence[int],
+) -> None:
+    """
+    Remove marker columns from a ``load_c3d``-style dict **in place** (before screening).
+
+    ``drop_indices`` are 0-based column indices in the loaded dynamic C3D (same convention
+    as ``loaded_point_indices_for_body`` / unlabeled numeric labels without display base).
+    """
+    if not drop_indices:
+        return
+    pts = data["points"]
+    n_points = int(pts.shape[1])
+    drop_set = {int(i) for i in drop_indices}
+    invalid = sorted(drop_set - set(range(n_points)))
+    if invalid:
+        raise ValueError(
+            f"drop_loaded_column_indices out of range for loaded dynamic (n_points={n_points}): {invalid}",
+        )
+    if len(drop_set) >= n_points:
+        raise ValueError("drop_loaded_column_indices would remove all marker columns.")
+    keep = [i for i in range(n_points) if i not in drop_set]
+    data["points"] = data["points"][:, keep, :].copy()
+    res = data.get("residual")
+    if res is not None:
+        data["residual"] = res[:, keep].copy()
+    labels = data.get("labels") or []
+    new_labels = [labels[i] for i in keep] if labels else [f"Point_{j}" for j in range(len(keep))]
+    data["labels"] = new_labels
+    data["point_labels"] = new_labels
+    data["n_points"] = len(keep)
 
 
 def _rotation_matrix_z_rad(angle_rad: float) -> np.ndarray:
@@ -105,6 +140,7 @@ def run_pipeline(
     y_outside_fraction_threshold: float | None = None,
     min_finite_y_frames: int | None = None,
     unlabeled_numeric_base: int | None = None,
+    drop_loaded_column_indices: Sequence[int] | None = None,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -137,6 +173,8 @@ def run_pipeline(
     skip_visibility_screening : if True, skip Step 2 (do not drop columns by visibility).
     y_outside_fraction_threshold, min_finite_y_frames : Step 1 Y screening; None uses defaults from constants.
     unlabeled_numeric_base : added to loaded 0-based index for unlabeled marker names in export (None = constant).
+    drop_loaded_column_indices : optional 0-based point column indices to remove from dynamic
+        immediately after ``load_c3d`` (before screening). Per-trial fix for bad channels.
 
     Returns
     -------
@@ -146,6 +184,20 @@ def run_pipeline(
     dynamic = load_c3d(dynamic_path, scale_factor=dynamic_scale)
     points_s = static["points"]
     labels_s = static["labels"]
+    original_n_dynamic = int(dynamic["points"].shape[1])
+    drop_set = (
+        frozenset(int(i) for i in drop_loaded_column_indices)
+        if drop_loaded_column_indices
+        else frozenset()
+    )
+    if drop_loaded_column_indices:
+        apply_drop_loaded_column_indices_to_c3d_dict(dynamic, drop_loaded_column_indices)
+    # Map each dynamic column (after optional drop) -> original loaded file 0-based column index
+    loaded_column_aliases = np.array(
+        [j for j in range(original_n_dynamic) if j not in drop_set],
+        dtype=np.int64,
+    )
+
     points_d = dynamic["points"]
     residual_d = dynamic.get("residual")
     rate = dynamic.get("rate") or 0.0
@@ -171,6 +223,7 @@ def run_pipeline(
         y_outside_fraction_threshold=_y_frac,
         min_finite_y_frames=_y_min_fin,
     )
+    screening_keep_for_loaded = loaded_column_aliases[np.asarray(screening_keep, dtype=np.int64)]
     if trim_first_frame is not None and trim_last_frame is not None:
         first_frame = trim_first_frame
     else:
@@ -289,7 +342,7 @@ def run_pipeline(
     obs_labels = ["OBSTACLE_L", "OBSTACLE_R"]
     if obstacle_indices and len(obstacle_labels) == 2:
         obs_labels = obstacle_labels
-    loaded_for_body = loaded_point_indices_for_body(screening_keep, keep)
+    loaded_for_body = loaded_point_indices_for_body(screening_keep_for_loaded, keep)
     _unlab_base = (
         UNLABELED_NUMERIC_LABEL_BASE
         if unlabeled_numeric_base is None

@@ -129,6 +129,13 @@ def main() -> None:
         metavar="B",
         help="Unlabeled marker names: display (loaded 0-based index) + B (default: from constants, 1 = 1-based).",
     )
+    parser.add_argument(
+        "--drop-loaded-columns",
+        type=str,
+        default=None,
+        metavar="I[,J,...]",
+        help="0-based column indices to remove from loaded dynamic (comma-separated), before Y/visibility screening.",
+    )
     args = parser.parse_args()
     out_prefix = args.output
     if out_prefix is None:
@@ -157,6 +164,11 @@ def main() -> None:
     static_scale = unit_scale[args.static_unit]
     dynamic_scale = unit_scale[args.dynamic_unit]
 
+    drop_loaded_columns: list[int] | None = None
+    if args.drop_loaded_columns:
+        parts = [p.strip() for p in args.drop_loaded_columns.split(",") if p.strip()]
+        drop_loaded_columns = [int(p) for p in parts]
+
     try:
         from .pipeline import run_pipeline
         info = run_pipeline(
@@ -181,6 +193,7 @@ def main() -> None:
             y_outside_fraction_threshold=args.y_outside_fraction,
             min_finite_y_frames=args.min_finite_y_frames,
             unlabeled_numeric_base=args.unlabeled_label_base,
+            drop_loaded_column_indices=drop_loaded_columns,
         )
         print(f"Labeled {info['n_markers']} markers, {info['n_frames']} frames.")
         if "best_frame_1based" in info:
