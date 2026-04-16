@@ -1188,6 +1188,7 @@ def label_body_markers(
     band_sizes: tuple[int, ...] | None = None,
     segment_geometry: list | None = None,
     use_screening_best_frame: bool = True,
+    fixed_best_frame: int | None = None,
     walking_direction_x: float | None = None,
     d_back_xy: np.ndarray | None = None,
     d_right_xy: np.ndarray | None = None,
@@ -1212,6 +1213,8 @@ def label_body_markers(
     segment_geometry : optional list from static segment geometry (arm/hand, gap fill)
     use_screening_best_frame : if True (default), use Step 5: middle range, ≥95%% visibility,
         minimal |v_foot| (foot proxy = mean of 6 smallest Z); fallback to trunk cost or residual.
+    fixed_best_frame : if set, use this 0-based frame index for axis/Z-band assignment (clamped
+        to valid range); automatic best-frame selection is skipped.
     walking_direction_x : optional; used only for head assignment when d_back_xy/d_right_xy set.
     d_back_xy, d_right_xy : optional (2,) xy vectors from get_lr_ap_axes_from_walking. When both
         provided, head markers (LFHD, RFHD, LBHD, RBHD) are assigned at best frame by top 4 Z and
@@ -1225,7 +1228,9 @@ def label_body_markers(
     """
     n_frames, n_points, _ = points_dynamic.shape
     trunk_labels = _trunk_labels_in_template(template)
-    if use_screening_best_frame:
+    if fixed_best_frame is not None:
+        best_f = int(max(0, min(n_frames - 1, int(fixed_best_frame))))
+    elif use_screening_best_frame:
         def _fallback(pts: np.ndarray, **kw) -> int:
             if len(trunk_labels) >= 3:
                 return best_frame_by_trunk_cost(

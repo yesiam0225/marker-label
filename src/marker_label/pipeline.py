@@ -12,12 +12,23 @@ from .io import load_c3d
 from .constants import (
     PELVIS_MARKERS,
     DEFAULT_OBSTACLE_VISIBILITY_MIN,
+    OBSTACLE_LABELS,
     WHOLE_BODY_39_SET,
     Z_BAND_SIZES_NO_ARM_HAND,
     EXPECTED_SCREENED_MARKERS,
     SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD,
     SCREENING_Y_MIN_FINITE_FRAMES,
     UNLABELED_NUMERIC_LABEL_BASE,
+)
+from .errors import (
+    ERR_AUTO_DROP_INVALID_THRESHOLD,
+    ERR_AUTO_DROP_REMOVE_ALL,
+    ERR_DROP_COLUMN_OUT_OF_RANGE,
+    ERR_DROP_COLUMN_REMOVE_ALL,
+    ERR_SKIP_LABEL_EMPTY_TEMPLATE,
+    ERR_SKIP_LABEL_OBSTACLE,
+    ERR_SKIP_LABEL_UNKNOWN,
+    LabelingPipelineError,
 )
 from .screening import (
     apply_initial_screening_steps_1_and_2,
@@ -57,11 +68,17 @@ def apply_drop_loaded_column_indices_to_c3d_dict(
     drop_set = {int(i) for i in drop_indices}
     invalid = sorted(drop_set - set(range(n_points)))
     if invalid:
-        raise ValueError(
+        raise LabelingPipelineError(
+            ERR_DROP_COLUMN_OUT_OF_RANGE,
             f"drop_loaded_column_indices out of range for loaded dynamic (n_points={n_points}): {invalid}",
+            step="drop_columns",
         )
     if len(drop_set) >= n_points:
-        raise ValueError("drop_loaded_column_indices would remove all marker columns.")
+        raise LabelingPipelineError(
+            ERR_DROP_COLUMN_REMOVE_ALL,
+            "drop_loaded_column_indices would remove all marker columns.",
+            step="drop_columns",
+        )
     keep = [i for i in range(n_points) if i not in drop_set]
     data["points"] = data["points"][:, keep, :].copy()
     res = data.get("residual")
@@ -72,6 +89,68 @@ def apply_drop_loaded_column_indices_to_c3d_dict(
     data["labels"] = new_labels
     data["point_labels"] = new_labels
     data["n_points"] = len(keep)
+
+
+def apply_drop_almost_empty_columns_to_c3d_dict(
+    data: dict,
+    *,
+    missing_fraction_ge: float,
+    loaded_column_aliases: np.ndarray,
+) -> tuple[np.ndarray, list[int]]:
+    """
+    Remove columns where the fraction of frames with no finite XYZ is >= ``missing_fraction_ge``.
+
+    C3D stores missing markers as (0,0,0); ``load_c3d`` converts those to NaN, which count as
+    non-finite here. Runs **after** manual ``drop_loaded_column_indices``.
+
+    Parameters
+    ----------
+    data : ``load_c3d``-style dict, modified in place.
+    missing_fraction_ge : drop column j if ``(1 - finite_frame_fraction[j]) >= missing_fraction_ge``.
+        Typical values: 0.9–0.99 for nearly-unused capture channels.
+    loaded_column_aliases : length ``n_points``; ``loaded_column_aliases[j]`` = original file
+        0-based column index for current column ``j``.
+
+    Returns
+    -------
+    loaded_column_aliases : updated array, length n_keep
+    removed_original_indices : original-file 0-based indices for dropped columns
+    """
+    if not (0.0 < float(missing_fraction_ge) <= 1.0):
+        raise LabelingPipelineError(
+            ERR_AUTO_DROP_INVALID_THRESHOLD,
+            f"auto_drop_missing_fraction_ge must be in (0, 1], got {missing_fraction_ge!r}",
+            step="drop_columns",
+        )
+    pts = data["points"]
+    n_frames, n_points, _ = pts.shape
+    if n_frames < 1 or n_points < 1:
+        return loaded_column_aliases, []
+    finite = np.isfinite(pts).all(axis=2)
+    miss_frac = 1.0 - np.mean(finite, axis=0).astype(np.float64)
+    drop_mask = miss_frac >= float(missing_fraction_ge) - 1e-15
+    n_drop = int(np.sum(drop_mask))
+    if n_drop == 0:
+        return loaded_column_aliases, []
+    removed_original = [int(loaded_column_aliases[j]) for j in range(n_points) if drop_mask[j]]
+    if n_drop >= n_points:
+        raise LabelingPipelineError(
+            ERR_AUTO_DROP_REMOVE_ALL,
+            f"auto-drop would remove all {n_points} marker columns (missing_fraction_ge={missing_fraction_ge}).",
+            step="drop_columns",
+        )
+    keep = [j for j in range(n_points) if not drop_mask[j]]
+    data["points"] = data["points"][:, keep, :].copy()
+    res = data.get("residual")
+    if res is not None:
+        data["residual"] = res[:, keep].copy()
+    labels = data.get("labels") or []
+    new_labels = [labels[i] for i in keep] if labels else [f"Point_{j}" for j in range(len(keep))]
+    data["labels"] = new_labels
+    data["point_labels"] = new_labels
+    data["n_points"] = len(keep)
+    new_aliases = loaded_column_aliases[np.asarray(keep, dtype=np.int64)]
+    return new_aliases, removed_original
 
 
 def _rotation_matrix_z_rad(angle_rad: float) -> np.ndarray:
@@ -141,6 +220,9 @@ def run_pipeline(
     min_finite_y_frames: int | None = None,
     unlabeled_numeric_base: int | None = None,
     drop_loaded_column_indices: Sequence[int] | None = None,
+    skip_label_names: Sequence[str] | None = None,
+    fixed_best_frame: int | None = None,
+    auto_drop_missing_fraction_ge: float | None = None,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -175,6 +257,13 @@ def run_pipeline(
     unlabeled_numeric_base : added to loaded 0-based index for unlabeled marker names in export (None = constant).
     drop_loaded_column_indices : optional 0-based point column indices to remove from dynamic
         immediately after ``load_c3d`` (before screening). Per-trial fix for bad channels.
+    skip_label_names : optional anatomical labels to **not** assign during body labeling, applied
+        after column drop and screening. Output omits these columns entirely (no NaN placeholders).
+    fixed_best_frame : optional 0-based frame index for head/Z-band assignment (skips automatic
+        best-frame selection).
+    auto_drop_missing_fraction_ge : optional; after manual column drop, remove any column whose
+        fraction of frames without finite XYZ is >= this value (e.g. 0.95 for empty C3D channels).
+        Disabled when ``None`` (default).
 
     Returns
     -------
@@ -197,6 +286,20 @@ def run_pipeline(
         [j for j in range(original_n_dynamic) if j not in drop_set],
         dtype=np.int64,
     )
+
+    auto_dropped_loaded_indices: list[int] = []
+    if auto_drop_missing_fraction_ge is not None:
+        loaded_column_aliases, auto_dropped_loaded_indices = apply_drop_almost_empty_columns_to_c3d_dict(
+            dynamic,
+            missing_fraction_ge=auto_drop_missing_fraction_ge,
+            loaded_column_aliases=loaded_column_aliases,
+        )
+        if auto_dropped_loaded_indices:
+            print(
+                "Auto-dropped loaded columns (missing XYZ fraction >= "
+                f"{float(auto_drop_missing_fraction_ge):.4f}): "
+                f"{sorted(auto_dropped_loaded_indices)}"
+            )
 
     points_d = dynamic["points"]
     residual_d = dynamic.get("residual")
@@ -291,6 +394,42 @@ def run_pipeline(
         k: v for k, v in template_body.items()
         if str(k).strip().upper() in WHOLE_BODY_39_SET
     }
+
+    # Skip anatomical labels for this trial (after column drop): no matching, no output columns.
+    body_labels_for_export = list(body_labels_static)
+    if skip_label_names:
+        skip_tokens = [s.strip() for s in skip_label_names if s.strip()]
+        skip_upper = {s.upper() for s in skip_tokens}
+        obstacle_u = {str(x).upper() for x in OBSTACLE_LABELS}
+        if skip_upper & obstacle_u:
+            raise LabelingPipelineError(
+                ERR_SKIP_LABEL_OBSTACLE,
+                "skip_label_names must not include OBSTACLE_L or OBSTACLE_R.",
+                step="labeling",
+            )
+        body_by_upper = {str(lab).strip().upper(): lab for lab in body_labels_static}
+        unknown = sorted(s for s in skip_upper if s not in body_by_upper)
+        if unknown:
+            raise LabelingPipelineError(
+                ERR_SKIP_LABEL_UNKNOWN,
+                f"unknown label(s) (not in static body labels): {unknown}",
+                step="labeling",
+            )
+
+        def _skipped(lab: str) -> bool:
+            return str(lab).strip().upper() in skip_upper
+
+        template_body = {k: v for k, v in template_body.items() if not _skipped(str(k))}
+        template_39 = {k: v for k, v in template_39.items() if not _skipped(str(k))}
+        body_labels_for_export = [l for l in body_labels_static if not _skipped(str(l))]
+        tpl_any = template_39 if template_39 else template_body
+        if not tpl_any:
+            raise LabelingPipelineError(
+                ERR_SKIP_LABEL_EMPTY_TEMPLATE,
+                "all body template markers were removed by skip_label_names.",
+                step="labeling",
+            )
+
     # Use no-arm-hand Z-band for dynamic labeling: save it and pass to label_body_markers
     label_to_band_no_arm_hand = (
         build_z_band_no_arm_hand_from_static(template_39) if template_39 else {}
@@ -323,6 +462,7 @@ def run_pipeline(
         walking_direction_x=wdx,
         d_back_xy=d_back,
         d_right_xy=d_right,
+        fixed_best_frame=fixed_best_frame,
     )
 
     print(f"Best frame for labeling: {best_frame} (0-based index; 1-based frame = {best_frame + 1})")
@@ -349,7 +489,7 @@ def run_pipeline(
         else unlabeled_numeric_base
     )
     points_full, labels_full = build_full_trajectory_matrix(
-        body_labels_static,
+        body_labels_for_export,
         points_d_body,
         label_per_frame,
         points_obstacle,
@@ -381,6 +521,11 @@ def run_pipeline(
     return {
         "static_labels": labels_s,
         "body_labels_static": body_labels_static,
+        "body_labels_for_export": body_labels_for_export,
+        "skipped_label_names": sorted(
+            {str(l).strip().upper() for l in body_labels_static}
+            - {str(l).strip().upper() for l in body_labels_for_export}
+        ),
         "n_screened": n_screened,
         "obstacle_indices": obstacle_indices,
         "obstacle_labels": obs_labels,
@@ -392,4 +537,5 @@ def run_pipeline(
         "best_frame_1based": best_frame + 1,
         "n_body_marker_columns": n_body_cols,
         "n_finite_xyz_at_best_frame": n_finite_xyz_best,
+        "auto_dropped_loaded_column_indices": auto_dropped_loaded_indices,
     }

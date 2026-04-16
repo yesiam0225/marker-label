@@ -136,6 +136,30 @@ def main() -> None:
         metavar="I[,J,...]",
         help="0-based column indices to remove from loaded dynamic (comma-separated), before Y/visibility screening.",
     )
+    parser.add_argument(
+        "--skip-labels",
+        type=str,
+        default=None,
+        metavar="NAME[,NAME,...]",
+        help="Static body label names to omit from labeling and from output (comma-separated), after column drop/screening.",
+    )
+    parser.add_argument(
+        "--best-frame",
+        type=int,
+        default=None,
+        metavar="N",
+        help="0-based frame index for labeling (skip automatic best-frame selection).",
+    )
+    parser.add_argument(
+        "--auto-drop-missing-fraction",
+        type=float,
+        default=None,
+        metavar="F",
+        help=(
+            "After --drop-loaded-columns, drop columns where at least this fraction of frames "
+            "have no finite XYZ (e.g. 0.95 for empty C3D channels; disabled if omitted)."
+        ),
+    )
     args = parser.parse_args()
     out_prefix = args.output
     if out_prefix is None:
@@ -169,6 +193,10 @@ def main() -> None:
         parts = [p.strip() for p in args.drop_loaded_columns.split(",") if p.strip()]
         drop_loaded_columns = [int(p) for p in parts]
 
+    skip_labels: list[str] | None = None
+    if args.skip_labels:
+        skip_labels = [p.strip() for p in args.skip_labels.split(",") if p.strip()]
+
     try:
         from .pipeline import run_pipeline
         info = run_pipeline(
@@ -194,6 +222,9 @@ def main() -> None:
             min_finite_y_frames=args.min_finite_y_frames,
             unlabeled_numeric_base=args.unlabeled_label_base,
             drop_loaded_column_indices=drop_loaded_columns,
+            skip_label_names=skip_labels,
+            fixed_best_frame=args.best_frame,
+            auto_drop_missing_fraction_ge=args.auto_drop_missing_fraction,
         )
         print(f"Labeled {info['n_markers']} markers, {info['n_frames']} frames.")
         if "best_frame_1based" in info:
@@ -207,7 +238,31 @@ def main() -> None:
             print(f"Filled: {out_prefix}_labeled_filled.c3d, {out_prefix}_labeled_filled.csv")
     except Exception as e:
         from .body_labeling import CLAVRBAKValidationError, C7ShoulderValidationError
-        print(f"Error: {e}", file=sys.stderr)
+        from .errors import LabelingPipelineError
+        from .screening import ScreeningError
+
+        if isinstance(e, LabelingPipelineError):
+            print(
+                f"Error [{e.error_code}] step={e.step}: {e.message}",
+                file=sys.stderr,
+            )
+        elif isinstance(e, ScreeningError):
+            print(
+                f"Error [{e.error_code}] screening_step={e.step}: {e.message}",
+                file=sys.stderr,
+            )
+        elif isinstance(e, CLAVRBAKValidationError):
+            print(
+                f"Error [{e.error_code}] step=labeling: {e.message}",
+                file=sys.stderr,
+            )
+        elif isinstance(e, C7ShoulderValidationError):
+            print(
+                f"Error [{e.error_code}] step=labeling: {e.message}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {e}", file=sys.stderr)
         if isinstance(e, CLAVRBAKValidationError) and (e.clav_idx is not None or e.rbak_idx is not None):
             print(f"Points tried as CLAV: index {e.clav_idx}, RBAK: index {e.rbak_idx}", file=sys.stderr)
         if isinstance(e, C7ShoulderValidationError) and (e.c7_idx is not None or e.lsho_idx is not None or e.rsho_idx is not None):

@@ -19,9 +19,10 @@ from .obstacle import visibility_fraction
 class ScreeningError(Exception):
     """Raised when a step of the dynamic trial initial screening fails."""
 
-    def __init__(self, step: int, message: str):
+    def __init__(self, step: int, message: str, *, error_code: str | None = None):
         self.step = step
         self.message = message
+        self.error_code = error_code or f"SCREENING_STEP_{step}"
         super().__init__(f"Initial screening Step {step} failed: {message}")
 
 
