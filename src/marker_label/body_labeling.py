@@ -628,7 +628,7 @@ def assign_leg_foot12_after_pelvis_arm12(
     clav_idx: int,
     template: dict,
 ) -> list[tuple[int, str]]:
-    """After pelvis/arm12: remaining points top 12 by Z. Split L/R by CLAV Y (left 6, right 6). Per side: Z desc -> THI,KNE,TIB,ANK; remaining 2 -> A/P HEE,TOE. Logs error codes on failure."""
+    """After pelvis/arm12: remaining points top 12 by Z. Split L/R by CLAV Y (left 6, right 6). Per side: Z desc top 3 -> THI,KNE,TIB; among the three lowest-Z points, ANK = max |Y - Y_CLAV|; remaining two -> A/P HEE,TOE. Logs error codes on failure."""
     logger = logging.getLogger(__name__)
     if clav_idx < 0 or not np.isfinite(points_frame[clav_idx, 1]):
         logger.warning("LEG_FOOT12_CLAV_INVALID: CLAV marker position invalid or missing; cannot split left/right by CLAV.")
@@ -679,9 +679,17 @@ def assign_leg_foot12_after_pelvis_arm12(
             (six_pts[order_z_side[0]], label_thi),
             (six_pts[order_z_side[1]], label_kne),
             (six_pts[order_z_side[2]], label_tib),
-            (six_pts[order_z_side[3]], label_ank),
         ]
-        foot_two = [six_pts[order_z_side[4]], six_pts[order_z_side[5]]]
+        foot_three = [six_pts[order_z_side[3]], six_pts[order_z_side[4]], six_pts[order_z_side[5]]]
+        y_dists = np.array([abs(float(points_frame[i, 1]) - clav_y) if np.isfinite(points_frame[i, 1]) else np.nan for i in foot_three])
+        if np.all(~np.isfinite(y_dists)):
+            logger.warning("LEG_FOOT12_ANK_Y_INVALID: All three foot candidates have invalid Y; falling back to 4th-by-Z as ANK.")
+            i_ank = 0
+        else:
+            i_ank = int(np.nanargmax(y_dists))
+        ank_idx = foot_three[i_ank]
+        foot_two = [foot_three[j] for j in range(3) if j != i_ank]
+        out.append((ank_idx, label_ank))
         if len(foot_two) != 2:
             logger.warning("LEG_FOOT12_FOOT_NOT_2: Expected 2 foot points remaining on one side, got %d.", len(foot_two))
             return out
