@@ -61,6 +61,13 @@ OBSTACLE_LABELS = ("OBSTACLE_L", "OBSTACLE_R")
 # Default visibility threshold for obstacle candidates (fraction of frames)
 DEFAULT_OBSTACLE_VISIBILITY_MIN = 0.80
 
+# After obstacle detection: drop non-obstacle screened columns with mean inter-frame speed
+# below this (mm/frame) and visibility >= obstacle threshold. Omit run_pipeline argument or pass
+# None to use this value — that is the standard pipeline behavior when two obstacles are detected.
+# Pass 0 to disable only for exceptional cases (policy: document why; see README).
+# 1 mm/frame: only near-stationary junk/extra channels; typical walking body markers exceed this.
+DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM = 1.0
+
 # Default frame range for "middle" of trial (fraction of total frames)
 DEFAULT_MIDDLE_START = 0.20
 DEFAULT_MIDDLE_END = 0.80

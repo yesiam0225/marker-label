@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 
-from marker_label.obstacle import motion_score_per_marker, visibility_fraction, detect_obstacle_markers
+from marker_label.obstacle import (
+    motion_score_per_marker,
+    screened_indices_extra_stationary_to_drop,
+    visibility_fraction,
+    detect_obstacle_markers,
+)
 from marker_label.body_labeling import match_markers_to_template, best_frame_for_matching
 from marker_label.gap_fill import fill_gaps_1d, fill_gaps_trajectory
 
@@ -32,6 +37,26 @@ def test_detect_obstacle_two_stationary():
     indices, labels = detect_obstacle_markers(points, n_obstacle=2, visibility_min=0.5)
     assert len(indices) == 2
     assert len(labels) == 2
+
+
+def test_screened_extra_stationary_drop_uses_full_trajectory_not_best_frame():
+    """Contract: extra stationary drop uses mean motion over all frames; labeling best frame is unrelated."""
+    n_frames = 50
+    pts = np.zeros((n_frames, 4, 3), dtype=np.float64)
+    pts[:, 0, :] = 1.0
+    pts[:, 1, :] = 2.0
+    pts[:, 2, :] = 3.0  # extra stationary (non-obstacle)
+    pts[:, 3, :] = np.linspace(0.0, 500.0, n_frames)[:, np.newaxis] + np.array([4.0, 4.0, 4.0])
+    obstacle_indices = [0, 1]
+    dropped = screened_indices_extra_stationary_to_drop(
+        pts,
+        obstacle_indices,
+        motion_max_mm=10.0,
+        visibility_min=0.5,
+    )
+    assert 0 not in dropped and 1 not in dropped
+    assert 2 in dropped
+    assert 3 not in dropped
 
 
 def test_match_markers_to_template():

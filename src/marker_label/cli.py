@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .constants import DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -148,7 +150,10 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="0-based frame index for labeling (skip automatic best-frame selection).",
+        help=(
+            "0-based frame index for labeling (skip automatic best-frame selection). "
+            "Does not change extra stationary column dropping (that uses full-trial motion)."
+        ),
     )
     parser.add_argument(
         "--column-fixed-labels",
@@ -166,6 +171,27 @@ def main() -> None:
         help=(
             "After --drop-loaded-columns, drop columns where at least this fraction of frames "
             "have no finite XYZ (e.g. 0.95 for empty C3D channels; disabled if omitted)."
+        ),
+    )
+    parser.add_argument(
+        "--drop-extra-stationary-below-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "After obstacle detection, drop non-obstacle screened columns when mean inter-frame "
+            f"speed < MM (mm/frame) and visibility >= obstacle threshold. When omitted, uses "
+            f"default {DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM} mm/frame (standard processing). "
+            "Use 0 to disable only for exceptional cases (e.g. unusual channel count, debugging). "
+            "Requires two obstacle markers. Uses full trial motion; not affected by --best-frame."
+        ),
+    )
+    parser.add_argument(
+        "--no-drop-extra-stationary",
+        action="store_true",
+        help=(
+            "Disable extra stationary column dropping (overrides default threshold). "
+            "Standard runs keep this enabled; use only for exceptional cases — document why."
         ),
     )
     args = parser.parse_args()
@@ -205,6 +231,13 @@ def main() -> None:
     if args.skip_labels:
         skip_labels = [p.strip() for p in args.skip_labels.split(",") if p.strip()]
 
+    if args.no_drop_extra_stationary:
+        drop_extra_stationary_mm: float | None = 0.0
+    elif args.drop_extra_stationary_below_mm is not None:
+        drop_extra_stationary_mm = float(args.drop_extra_stationary_below_mm)
+    else:
+        drop_extra_stationary_mm = None
+
     try:
         from .pipeline import run_pipeline
         info = run_pipeline(
@@ -234,6 +267,7 @@ def main() -> None:
             fixed_best_frame=args.best_frame,
             auto_drop_missing_fraction_ge=args.auto_drop_missing_fraction,
             column_fixed_labels=args.column_fixed_labels,
+            drop_extra_stationary_motion_max_mm=drop_extra_stationary_mm,
         )
         print(f"Labeled {info['n_markers']} markers, {info['n_frames']} frames.")
         if "best_frame_1based" in info:

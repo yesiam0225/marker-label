@@ -1,6 +1,12 @@
-"""Obstacle marker detection by stationarity."""
+"""Obstacle marker detection by stationarity.
+
+Extra stationary column dropping (``screened_indices_extra_stationary_to_drop``) is part of the
+standard pipeline when two obstacles exist; disabling it is for exceptional cases — see README.
+"""
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -91,6 +97,54 @@ def detect_obstacle_markers(
     indices = list(selected_candidates[lr_order])
     label_names = [obstacle_labels_ordered[i] for i in range(n_obstacle)]
     return indices, label_names
+
+
+def screened_indices_extra_stationary_to_drop(
+    points: np.ndarray,
+    obstacle_indices: Sequence[int],
+    *,
+    motion_max_mm: float,
+    visibility_min: float,
+) -> list[int]:
+    """
+    Screened-column indices to drop: markers that are not obstacles but are as stationary
+    as the threshold allows (mean inter-frame displacement < ``motion_max_mm``).
+
+    Uses **all frames** in ``points`` (same statistic as :func:`motion_score_per_marker`).
+    Labeling best frame (manual or automatic) is not used and must not affect this call.
+
+    Obstacle columns are never selected. Markers below ``visibility_min`` are skipped
+    (same idea as obstacle candidates).
+    """
+    n_points = points.shape[1]
+    obs = frozenset(int(i) for i in obstacle_indices)
+    motion = motion_score_per_marker(points)
+    visibility = visibility_fraction(points)
+    out: list[int] = []
+    for j in range(n_points):
+        if j in obs:
+            continue
+        if visibility[j] < visibility_min:
+            continue
+        if not np.isfinite(motion[j]):
+            continue
+        if float(motion[j]) < float(motion_max_mm):
+            out.append(j)
+    return out
+
+
+def remap_indices_after_screened_drops(
+    indices: Sequence[int],
+    dropped_screened: Sequence[int],
+) -> list[int]:
+    """Remap column indices after removing screened columns ``dropped_screened`` (sorted ascending)."""
+    drop_set = sorted(set(int(d) for d in dropped_screened))
+    out: list[int] = []
+    for i in indices:
+        ii = int(i)
+        shift = sum(1 for d in drop_set if d < ii)
+        out.append(ii - shift)
+    return out
 
 
 def remove_indices_from_trajectories(

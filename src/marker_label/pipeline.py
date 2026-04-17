@@ -15,6 +15,7 @@ from .constants import (
     OBSTACLE_LABELS,
     WHOLE_BODY_39_SET,
     Z_BAND_SIZES_NO_ARM_HAND,
+    DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM,
     EXPECTED_SCREENED_MARKERS,
     SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD,
     SCREENING_Y_MIN_FINITE_FRAMES,
@@ -25,6 +26,8 @@ from .errors import (
     ERR_AUTO_DROP_REMOVE_ALL,
     ERR_DROP_COLUMN_OUT_OF_RANGE,
     ERR_DROP_COLUMN_REMOVE_ALL,
+    ERR_EXTRA_STATIONARY_INVALID,
+    ERR_EXTRA_STATIONARY_REMOVE_ALL,
     ERR_SKIP_LABEL_EMPTY_TEMPLATE,
     ERR_SKIP_LABEL_OBSTACLE,
     ERR_SKIP_LABEL_UNKNOWN,
@@ -37,7 +40,11 @@ from .screening import (
     loaded_point_indices_for_body,
     ScreeningError,
 )
-from .obstacle import detect_obstacle_markers
+from .obstacle import (
+    detect_obstacle_markers,
+    remap_indices_after_screened_drops,
+    screened_indices_extra_stationary_to_drop,
+)
 from .body_labeling import build_template_from_static, label_body_markers
 from .static_geometry import (
     build_z_band_by_rank_from_static,
@@ -193,6 +200,28 @@ def rotation_for_facing_axes(
     return _rotation_matrix_z_rad(angle_rad)
 
 
+def _apply_drop_screened_columns(
+    points_d: np.ndarray,
+    residual_d: np.ndarray | None,
+    drop_screened: Sequence[int],
+    screening_keep_for_loaded: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Remove screened columns by index; update ``screening_keep_for_loaded``."""
+    drop_set = sorted(set(int(x) for x in drop_screened))
+    n = int(points_d.shape[1])
+    keep = [j for j in range(n) if j not in drop_set]
+    if len(keep) == 0:
+        raise LabelingPipelineError(
+            ERR_EXTRA_STATIONARY_REMOVE_ALL,
+            "extra stationary drop would remove all screened marker columns.",
+            step="extra_stationary",
+        )
+    new_pts = points_d[:, keep, :].copy()
+    new_res = residual_d[:, keep].copy() if residual_d is not None else None
+    new_sk = screening_keep_for_loaded[np.asarray(keep, dtype=np.int64)]
+    return new_pts, new_res, new_sk
+
+
 def run_pipeline(
     static_path: str,
     dynamic_path: str,
@@ -224,6 +253,7 @@ def run_pipeline(
     fixed_best_frame: int | None = None,
     auto_drop_missing_fraction_ge: float | None = None,
     column_fixed_labels: bool = False,
+    drop_extra_stationary_motion_max_mm: float | None = None,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -261,12 +291,22 @@ def run_pipeline(
     skip_label_names : optional anatomical labels to **not** assign during body labeling, applied
         after column drop and screening. Output omits these columns entirely (no NaN placeholders).
     fixed_best_frame : optional 0-based frame index for head/Z-band assignment (skips automatic
-        best-frame selection).
+        best-frame selection). Does **not** affect extra stationary column dropping: that step runs
+        earlier, uses mean inter-frame motion over **all** frames in the current dynamic trial, and
+        never consults ``fixed_best_frame`` or automatic best-frame logic.
     auto_drop_missing_fraction_ge : optional; after manual column drop, remove any column whose
         fraction of frames without finite XYZ is >= this value (e.g. 0.95 for empty C3D channels).
         Disabled when ``None`` (default).
     column_fixed_labels : if True, keep each body's best-frame label on the same column for all
         frames (skip temporal nearest-neighbor propagation).
+    drop_extra_stationary_motion_max_mm : mean inter-frame speed threshold (mm/frame) for dropping
+        extra stationary screened columns after obstacle detection. ``None`` uses
+        ``DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM`` from constants — **standard pipeline** behavior
+        when two obstacles are detected. Use ``0`` only to disable for **exceptional** cases
+        (e.g. debugging, trials where the drop removes too many channels); team policy should
+        record the reason out of band. Requires at least two obstacle markers detected.
+        Motion is computed over the **full** trajectory (same as obstacle motion scores); it does
+        not depend on ``fixed_best_frame`` or ``middle_start`` / ``middle_end``.
 
     Returns
     -------
@@ -363,6 +403,49 @@ def run_pipeline(
             f"could not detect 2 obstacle markers (found {len(obstacle_indices)} with "
             f"visibility >= {obstacle_visibility_min:.0%} and lowest motion).",
         )
+
+    dropped_extra_stationary_loaded: list[int] = []
+    # Extra stationary drop: full-trial mean motion only; runs before template/body labeling and is
+    # independent of fixed_best_frame (manual or automatic best frame is chosen later).
+    if drop_extra_stationary_motion_max_mm is None:
+        _extra_mm = float(DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM)
+    else:
+        _extra_mm = float(drop_extra_stationary_motion_max_mm)
+    if _extra_mm < 0:
+        raise LabelingPipelineError(
+            ERR_EXTRA_STATIONARY_INVALID,
+            "drop_extra_stationary_motion_max_mm must be None, >= 0, or omitted (use default).",
+            step="extra_stationary",
+        )
+    if _extra_mm > 0 and len(obstacle_indices) >= 2:
+        extra_drop = screened_indices_extra_stationary_to_drop(
+            points_d,
+            obstacle_indices,
+            motion_max_mm=_extra_mm,
+            visibility_min=float(obstacle_visibility_min),
+        )
+        if extra_drop:
+            dropped_extra_stationary_loaded = [
+                int(screening_keep_for_loaded[j]) for j in extra_drop
+            ]
+            points_d, residual_d, screening_keep_for_loaded = _apply_drop_screened_columns(
+                points_d,
+                residual_d,
+                extra_drop,
+                screening_keep_for_loaded,
+            )
+            obstacle_indices = remap_indices_after_screened_drops(
+                obstacle_indices, extra_drop
+            )
+            n_screened = int(points_d.shape[1])
+            dynamic["points"] = points_d
+            if residual_d is not None:
+                dynamic["residual"] = residual_d
+            print(
+                f"Dropped {len(extra_drop)} extra stationary screened column(s); "
+                f"loaded 0-based indices: {sorted(dropped_extra_stationary_loaded)}"
+            )
+
     n_frames_d = points_d.shape[0]
     # Extract obstacle trajectories; default (n_frames, 2, 3) NaN if none
     if len(obstacle_indices) >= 2:
@@ -542,4 +625,5 @@ def run_pipeline(
         "n_body_marker_columns": n_body_cols,
         "n_finite_xyz_at_best_frame": n_finite_xyz_best,
         "auto_dropped_loaded_column_indices": auto_dropped_loaded_indices,
+        "dropped_extra_stationary_loaded_indices": dropped_extra_stationary_loaded,
     }
