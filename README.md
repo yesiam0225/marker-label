@@ -37,12 +37,16 @@ Options:
 - `--max-match-distance MM`: Reject initial assignment when point–template distance > MM mm (e.g. 300) to avoid bad matches.
 - `--max-propagation-distance MM`: Do not propagate a label to the nearest point if it is > MM mm away (e.g. 150) to reduce swaps after dropout or when markers cross.
 - `--reference-report JSON`: Use reference analysis (from `marker-label-analyze -o`) to set best-frame search window and optional distance thresholds. See [docs/REFERENCE_GUIDED_LABELING.md](docs/REFERENCE_GUIDED_LABELING.md).
+- `--drop-extra-stationary-below-mm MM`: After obstacle detection, drop non-obstacle screened columns whose full-trial mean inter-frame speed is below `MM` mm/frame (and visibility meets the obstacle threshold). **Omitted = use the built-in default (standard processing).** Use `0` only in exceptional cases; document why.
+- `--no-drop-extra-stationary`: Turn off that drop entirely (overrides default). **Standard runs leave it on;** use only for exceptional cases and document why.
+- `--no-check-screened-count`: Allow screened column count other than 41 (e.g. extra hardware channels).
 
 ### Python
 
 ```python
 from marker_label.pipeline import run_pipeline
 
+# Standard processing: omit ``drop_extra_stationary_motion_max_mm`` (default threshold when two obstacles exist).
 run_pipeline(
     "static_labeled.c3d",
     "dynamic_unlabeled.c3d",
@@ -132,12 +136,14 @@ Options: `--sample N` (analyze every Nth frame; default 1), `--pelvis-frame` (bu
 ## Pipeline summary
 
 1. Load static (labeled) and dynamic (unlabeled) C3D.
-2. Detect obstacle markers (2 most stationary with ≥80% visibility); remove from set.
-3. Build body template from static (mean position per label).
-4. Select best frame in dynamic (middle portion, high quality).
-5. Match remaining markers to template; propagate labels temporally.
-6. Build full output: body labels (static order, NaN where missing) + OBSTACLE_L, OBSTACLE_R.
-7. Export original and filled C3D + CSV.
+2. Initial screening on the dynamic trial (Y range, optional frame trim, visibility) as configured.
+3. Detect obstacle markers (2 most stationary with ≥80% visibility); remove from body labeling set.
+4. **Extra stationary drop (standard):** After obstacles are known, drop other screened columns that are highly stationary and visible (full-trial mean inter-frame speed below a default mm/frame threshold). Runs when two obstacles are detected. **Default CLI/API behavior keeps this enabled** (`None` → default threshold). Disabling (`--no-drop-extra-stationary` or `--drop-extra-stationary-below-mm 0`) is for **exceptional** cases only (e.g. extra capture channels, debugging); note the reason in your workflow or PR when you disable it.
+5. Build body template from static (mean position per label).
+6. Select best frame in dynamic (middle portion, high quality, or a fixed frame if set).
+7. Match remaining markers to template; propagate labels temporally (unless column-fixed mode).
+8. Build full output: body labels (static order, NaN where missing) + OBSTACLE_L, OBSTACLE_R.
+9. Export original and filled C3D + CSV.
 
 For a detailed explanation of the logic and what to check when labeling fails, see [docs/MARKER_LABELING_LOGIC.md](docs/MARKER_LABELING_LOGIC.md).
 

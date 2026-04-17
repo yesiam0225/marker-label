@@ -18,9 +18,10 @@ This document explains how the pipeline assigns labels to unlabeled dynamic mark
 **High-level steps**
 
 1. **Obstacle detection** (on dynamic): find the 2 most “stationary” markers with high visibility → label them OBSTACLE_L / OBSTACLE_R and remove them from the body set.
-2. **Template** (from static): build one 3D position per body label (mean over static frames).
-3. **Body labeling** (on remaining dynamic points): pick one “best” frame in the middle, match points to template by nearest neighbor, then propagate labels forward/backward in time.
-4. **Assemble**: body markers in static order + obstacle markers → full labeled matrix and export.
+2. **Extra stationary column drop** (standard): After obstacles are fixed, optionally drop *other* screened columns that are similarly stationary and highly visible (full-trial mean inter-frame motion below a threshold). **Default pipeline behavior enables this** when two obstacles exist (`run_pipeline(..., drop_extra_stationary_motion_max_mm=None)` or CLI with no disable flags). Disabling (`0` or `--no-drop-extra-stationary`) is reserved for **exceptional** cases (e.g. unusual channel count); team policy is to document the reason outside the code. See `obstacle.screened_indices_extra_stationary_to_drop` and README “Pipeline summary”.
+3. **Template** (from static): build one 3D position per body label (mean over static frames).
+4. **Body labeling** (on remaining dynamic points): pick one “best” frame in the middle, match points to template by nearest neighbor, then propagate labels forward/backward in time.
+5. **Assemble**: body markers in static order + obstacle markers → full labeled matrix and export.
 
 ---
 
