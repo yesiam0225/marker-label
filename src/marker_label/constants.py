@@ -119,7 +119,7 @@ PELVIS_ARM_MISSING_GROUP = "PELVIS_ARM_MISSING_GROUP"
 ARM_SIDE_TOO_FEW_FOR_Z = "ARM_SIDE_TOO_FEW_FOR_Z"
 ARM_SIDE_INVALID_Z_ORDER = "ARM_SIDE_INVALID_Z_ORDER"
 
-# Leg/foot (12): from remaining points, top 12 by Z; split L/R by CLAV Y; per-side Z order THI,KNE,TIB,ANK; remaining 2 per side A/P -> HEE,TOE.
+# Leg/foot (12): from remaining points, top 12 by Z; split L/R by CLAV Y; per-side Z order THI,KNE,TIB,ANK; remaining 2 per side A/P on d_back (TOE anterior, HEE posterior).
 LEG_FOOT12_MARKERS = (
     "LTHI", "RTHI", "LKNE", "RKNE", "LTIB", "RTIB", "LANK", "RANK",
     "LHEE", "LTOE", "RHEE", "RTOE",

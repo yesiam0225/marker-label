@@ -628,7 +628,7 @@ def assign_leg_foot12_after_pelvis_arm12(
     clav_idx: int,
     template: dict,
 ) -> list[tuple[int, str]]:
-    """After pelvis/arm12: remaining points top 12 by Z. Split L/R by CLAV Y (left 6, right 6). Per side: Z desc top 3 -> THI,KNE,TIB; among the three lowest-Z points, ANK = max |Y - Y_CLAV|; remaining two -> A/P HEE,TOE. Logs error codes on failure."""
+    """After pelvis/arm12: remaining points top 12 by Z. Split L/R by CLAV Y (left 6, right 6). Per side: Z desc top 3 -> THI,KNE,TIB; among the three lowest-Z points, ANK = max |Y - Y_CLAV|; remaining two -> A/P by projection on d_back_xy (smaller = anterior = TOE, larger = posterior = HEE; same convention as head). Logs error codes on failure."""
     logger = logging.getLogger(__name__)
     if clav_idx < 0 or not np.isfinite(points_frame[clav_idx, 1]):
         logger.warning("LEG_FOOT12_CLAV_INVALID: CLAV marker position invalid or missing; cannot split left/right by CLAV.")
@@ -698,8 +698,9 @@ def assign_leg_foot12_after_pelvis_arm12(
             logger.warning("LEG_FOOT12_FOOT_AP_INVALID: Foot side has invalid or identical A/P; cannot assign HEE/TOE.")
             return out
         order_ap = np.argsort(dot_back)
-        out.append((foot_two[order_ap[0]], label_hee))
-        out.append((foot_two[order_ap[1]], label_toe))
+        # d_back_xy points posterior: smaller dot = anterior (TOE), larger = posterior (HEE); see assign_head_markers_by_top4_z
+        out.append((foot_two[order_ap[0]], label_toe))
+        out.append((foot_two[order_ap[1]], label_hee))
         return out
 
     left_out = assign_side_six(left6, _lab("LTHI"), _lab("LKNE"), _lab("LTIB"), _lab("LANK"), _lab("LHEE"), _lab("LTOE"))
@@ -1389,7 +1390,7 @@ def label_body_markers(
             )
             if pelvis_arm12_assignments:
                 priority_pt_set = priority_pt_set | {pi for pi, _ in pelvis_arm12_assignments}
-        # Leg/foot (12): remaining points top 12 by Z; split L/R by CLAV Y; per-side Z order THI,KNE,TIB,ANK; remaining 2 per side A/P -> HEE,TOE
+        # Leg/foot (12): remaining points top 12 by Z; split L/R by CLAV Y; per-side Z order THI,KNE,TIB,ANK; remaining 2 per side A/P on d_back (TOE=anterior, HEE=posterior)
         leg_foot12_assignments: list[tuple[int, str]] = []
         clav_idx = next((pi for pi, lab in clav_rbak_assignments if str(lab).strip().upper() == "CLAV"), -1)
         use_leg_foot12 = (
