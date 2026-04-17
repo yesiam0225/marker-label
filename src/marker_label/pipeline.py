@@ -223,6 +223,7 @@ def run_pipeline(
     skip_label_names: Sequence[str] | None = None,
     fixed_best_frame: int | None = None,
     auto_drop_missing_fraction_ge: float | None = None,
+    column_fixed_labels: bool = False,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -264,6 +265,8 @@ def run_pipeline(
     auto_drop_missing_fraction_ge : optional; after manual column drop, remove any column whose
         fraction of frames without finite XYZ is >= this value (e.g. 0.95 for empty C3D channels).
         Disabled when ``None`` (default).
+    column_fixed_labels : if True, keep each body's best-frame label on the same column for all
+        frames (skip temporal nearest-neighbor propagation).
 
     Returns
     -------
@@ -463,6 +466,7 @@ def run_pipeline(
         d_back_xy=d_back,
         d_right_xy=d_right,
         fixed_best_frame=fixed_best_frame,
+        column_fixed_labels=column_fixed_labels,
     )
 
     print(f"Best frame for labeling: {best_frame} (0-based index; 1-based frame = {best_frame + 1})")

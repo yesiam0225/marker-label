@@ -151,6 +151,14 @@ def main() -> None:
         help="0-based frame index for labeling (skip automatic best-frame selection).",
     )
     parser.add_argument(
+        "--column-fixed-labels",
+        action="store_true",
+        help=(
+            "Keep each body's label from the labeling frame on the same column for all frames "
+            "(skip temporal nearest-neighbor propagation)."
+        ),
+    )
+    parser.add_argument(
         "--auto-drop-missing-fraction",
         type=float,
         default=None,
@@ -225,6 +233,7 @@ def main() -> None:
             skip_label_names=skip_labels,
             fixed_best_frame=args.best_frame,
             auto_drop_missing_fraction_ge=args.auto_drop_missing_fraction,
+            column_fixed_labels=args.column_fixed_labels,
         )
         print(f"Labeled {info['n_markers']} markers, {info['n_frames']} frames.")
         if "best_frame_1based" in info:

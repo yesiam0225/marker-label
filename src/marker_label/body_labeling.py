@@ -1140,6 +1140,29 @@ def propagate_labels_temporal(
     return result
 
 
+def column_fixed_labels_from_assignments(
+    n_frames: int,
+    n_points: int,
+    assignments: list[tuple[int, str]],
+) -> np.ndarray:
+    """
+    Build (n_frames, n_points) label array: each column keeps the label from ``assignments``
+    at every frame (no nearest-neighbor propagation along time).
+
+    Unassigned columns remain empty string. If ``assignments`` lists the same ``pi`` twice,
+    the last pair wins.
+    """
+    col = np.empty(n_points, dtype=object)
+    col[:] = ""
+    for pi, lab in assignments:
+        col[int(pi)] = lab
+    out = np.empty((n_frames, n_points), dtype=object)
+    out[:] = ""
+    for f in range(n_frames):
+        out[f, :] = col
+    return out
+
+
 def _match_within_z_bands(
     points_frame: np.ndarray,
     template: dict[str, np.ndarray],
@@ -1201,6 +1224,7 @@ def label_body_markers(
     walking_direction_x: float | None = None,
     d_back_xy: np.ndarray | None = None,
     d_right_xy: np.ndarray | None = None,
+    column_fixed_labels: bool = False,
 ) -> tuple[list[str], np.ndarray]:
     """
     Label body markers in dynamic trial using template and temporal propagation.
@@ -1224,6 +1248,8 @@ def label_body_markers(
         minimal |v_foot| (foot proxy = mean of 6 smallest Z); fallback to trunk cost or residual.
     fixed_best_frame : if set, use this 0-based frame index for axis/Z-band assignment (clamped
         to valid range); automatic best-frame selection is skipped.
+    column_fixed_labels : if True, each body column keeps its best-frame label at all frames
+        (no temporal nearest-neighbor propagation).
     walking_direction_x : optional; used only for head assignment when d_back_xy/d_right_xy set.
     d_back_xy, d_right_xy : optional (2,) xy vectors from get_lr_ap_axes_from_walking. When both
         provided, head markers (LFHD, RFHD, LBHD, RBHD) are assigned at best frame by top 4 Z and
@@ -1521,11 +1547,14 @@ def label_body_markers(
         # else: keep original assignments (trunk matching failed or did not help)
     if not assignments:
         return [""] * n_points, np.empty((n_frames, n_points), dtype=object), best_f
-    label_per_frame = propagate_labels_temporal(
-        points_dynamic,
-        assignments,
-        best_f,
-        max_propagation_distance=max_propagation_distance,
-    )
+    if column_fixed_labels:
+        label_per_frame = column_fixed_labels_from_assignments(n_frames, n_points, assignments)
+    else:
+        label_per_frame = propagate_labels_temporal(
+            points_dynamic,
+            assignments,
+            best_f,
+            max_propagation_distance=max_propagation_distance,
+        )
     labels_out = [label_per_frame[best_f, pi] for pi in range(n_points)]
     return labels_out, label_per_frame, best_f
