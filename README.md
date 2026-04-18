@@ -5,7 +5,7 @@ Label marker sets in motion capture C3D files using subject-specific static tria
 ## Features
 
 - **Subject-specific**: Uses each subject's labeled static trial to build a body template.
-- **Obstacle markers**: Detected first (stationarity + visibility ≥ 80%), then labeled OBSTACLE_L / OBSTACLE_R.
+- **Obstacle markers**: Detected first. **Default:** `rod_pair` mode (median motion + rod geometry on simultaneous finite frames; min visibility **0.72**; motion cap **5.0** mm/frame unless disabled). Labels **OBSTACLE_L** / **OBSTACLE_R**. Use `--obstacle-mode legacy` for the older “two lowest mean-motion columns” rule.
 - **Body markers**: Template match at a middle high-quality frame, then propagate labels forward and backward.
 - **Gap filling**: Optional export of filled trajectories (linear/spline for short/medium gaps, propagation for long).
 - **Output**: Both original (NaNs preserved) and filled C3D and CSV (rows = frames, columns = frame, time, `{marker}_x`, `{marker}_y`, `{marker}_z`).
@@ -30,7 +30,9 @@ marker-label "path/to/BBA01 Cal 01.c3d" "path/to/BBA01 Trial 05.c3d" -o out/BBA0
 Options:
 - `-o, --output`: Output path prefix (default: dynamic path + `_labeled`).
 - `--no-filled`: Do not export filled C3D/CSV.
-- `--obstacle-visibility FRAC`: Min visibility for obstacle candidates (default 0.80).
+- `--obstacle-visibility FRAC`: Min visibility for obstacle candidates (default **0.72**, for `rod_pair`). Use e.g. **0.80** with `--obstacle-mode legacy` if needed.
+- `--obstacle-mode {rod_pair,legacy}`: **Default `rod_pair`** (rod geometry + median motion). `legacy` = two lowest **mean**-motion columns among qualified candidates.
+- `--obstacle-max-motion-mm MM`: Candidate motion cap (**median** in `rod_pair`, **mean** in `legacy`). **Omitted = default 5.0 mm/frame.** Use `0` to disable the cap.
 - `--max-interp-frames N`: Max gap length for spline interpolation (default 10).
 - `--static-facing AXIS`, `--dynamic-facing AXIS`: When static and dynamic were captured with the subject facing different lab axes (e.g. static facing **y**, dynamic facing **x**), use `--static-facing y --dynamic-facing x` so the pipeline rotates dynamic to align with static before matching. Values: `x`, `-x`, `y`, `-y`. Output coordinates remain in the original lab frame.
 - `--static-unit {mm,m}`, `--dynamic-unit {mm,m}`: Unit of the C3D coordinates (default `mm`). Use `m` if the file is in meters; coordinates are scaled to mm internally so static and dynamic match.
@@ -51,7 +53,7 @@ run_pipeline(
     "static_labeled.c3d",
     "dynamic_unlabeled.c3d",
     "out/trial_01",
-    obstacle_visibility_min=0.80,
+    # obstacle_visibility_min defaults to 0.72 (rod_pair); pass 0.80 for legacy mode
     static_facing_axis="y",   # optional: subject facing y in static
     dynamic_facing_axis="x",  # optional: subject facing x in dynamic
     export_filled=True,
@@ -137,7 +139,7 @@ Options: `--sample N` (analyze every Nth frame; default 1), `--pelvis-frame` (bu
 
 1. Load static (labeled) and dynamic (unlabeled) C3D.
 2. Initial screening on the dynamic trial (Y range, optional frame trim, visibility) as configured.
-3. Detect obstacle markers (2 most stationary with ≥80% visibility); remove from body labeling set.
+3. Detect obstacle markers (default **`rod_pair`**: median motion, rod geometry, min visibility **0.72**; or **`legacy`**: two lowest mean-motion columns among qualified); remove from body labeling set.
 4. **Extra stationary drop (standard):** After obstacles are known, drop other screened columns that are highly stationary and visible (full-trial mean inter-frame speed below a default mm/frame threshold). Runs when two obstacles are detected. **Default CLI/API behavior keeps this enabled** (`None` → default threshold). Disabling (`--no-drop-extra-stationary` or `--drop-extra-stationary-below-mm 0`) is for **exceptional** cases only (e.g. extra capture channels, debugging); note the reason in your workflow or PR when you disable it.
 5. Build body template from static (mean position per label).
 6. Select best frame in dynamic (middle portion, high quality, or a fixed frame if set).

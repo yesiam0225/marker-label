@@ -4,10 +4,12 @@ import numpy as np
 import pytest
 
 from marker_label.obstacle import (
+    detect_obstacle_markers,
+    detect_obstacle_markers_rod_pair,
+    median_motion_per_marker,
     motion_score_per_marker,
     screened_indices_extra_stationary_to_drop,
     visibility_fraction,
-    detect_obstacle_markers,
 )
 from marker_label.body_labeling import match_markers_to_template, best_frame_for_matching
 from marker_label.gap_fill import fill_gaps_1d, fill_gaps_trajectory
@@ -29,12 +31,44 @@ def test_visibility_fraction():
     assert vis[2] == 1.0
 
 
+def test_median_motion_per_marker_shape():
+    n_frames, n_points = 40, 4
+    points = np.random.randn(n_frames, n_points, 3).astype(np.float64)
+    score = median_motion_per_marker(points)
+    assert score.shape == (n_points,)
+
+
+def test_detect_obstacle_rod_pair_bar_along_y():
+    """Two quiet endpoints on a long rod along Y; walking noise on other columns."""
+    n_frames, n_pts = 150, 8
+    rng = np.random.default_rng(0)
+    points = rng.standard_normal((n_frames, n_pts, 3)) * 8.0 + np.array([600.0, 200.0, 400.0])
+    points[:, 0, :] = np.array([100.0, 50.0, 80.0]) + rng.standard_normal((n_frames, 3)) * 0.3
+    points[:, 1, :] = np.array([110.0, 1550.0, 85.0]) + rng.standard_normal((n_frames, 3)) * 0.3
+    idx, labels = detect_obstacle_markers_rod_pair(
+        points,
+        visibility_min=0.95,
+        visibility_floor=0.55,
+        motion_max_mm=5.0,
+        rod_length_min_mm=400.0,
+        rod_separation_axis="y",
+        rod_min_overlap_frames=30,
+    )
+    assert set(idx) == {0, 1}
+    assert len(labels) == 2
+
+
 def test_detect_obstacle_two_stationary():
     n_frames, n_points = 100, 5
     points = np.random.randn(n_frames, n_points, 3) * 0.1
     points[:, 0, :] = 1.0  # stationary
     points[:, 1, :] = 2.0  # stationary
-    indices, labels = detect_obstacle_markers(points, n_obstacle=2, visibility_min=0.5)
+    indices, labels = detect_obstacle_markers(
+        points,
+        n_obstacle=2,
+        visibility_min=0.5,
+        motion_max_mm=0,
+    )
     assert len(indices) == 2
     assert len(labels) == 2
 
@@ -57,6 +91,29 @@ def test_screened_extra_stationary_drop_uses_full_trajectory_not_best_frame():
     assert 0 not in dropped and 1 not in dropped
     assert 2 in dropped
     assert 3 not in dropped
+
+
+def test_foot_triple_longest_edge_opposite_vertex_is_ank():
+    """Longest 3D edge among foot triple → HEE/TOE endpoints; third vertex → ANK (set logic)."""
+    # HEE, TOE far apart on x; ANK offset — longest edge is HEE–TOE, opposite vertex is ANK.
+    pts3 = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [200.0, 0.0, 0.0],
+            [80.0, 60.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    pair_edges = (
+        (0, 1, float(np.linalg.norm(pts3[0] - pts3[1]))),
+        (0, 2, float(np.linalg.norm(pts3[0] - pts3[2]))),
+        (1, 2, float(np.linalg.norm(pts3[1] - pts3[2]))),
+    )
+    ia, ib, max_d = max(pair_edges, key=lambda t: t[2])
+    ic = ({0, 1, 2} - {ia, ib}).pop()
+    assert ia == 0 and ib == 1
+    assert max_d == 200.0
+    assert ic == 2
 
 
 def test_match_markers_to_template():

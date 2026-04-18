@@ -11,15 +11,20 @@ import numpy as np
 from .io import load_c3d
 from .constants import (
     PELVIS_MARKERS,
-    DEFAULT_OBSTACLE_VISIBILITY_MIN,
+    DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM,
+    DEFAULT_OBSTACLE_MAX_MOTION_MM,
+    DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM,
+    DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
+    DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
+    DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
+    DEFAULT_OBSTACLE_VISIBILITY_FLOOR,
+    EXPECTED_SCREENED_MARKERS,
     OBSTACLE_LABELS,
+    SCREENING_Y_MIN_FINITE_FRAMES,
+    SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD,
+    UNLABELED_NUMERIC_LABEL_BASE,
     WHOLE_BODY_39_SET,
     Z_BAND_SIZES_NO_ARM_HAND,
-    DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM,
-    EXPECTED_SCREENED_MARKERS,
-    SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD,
-    SCREENING_Y_MIN_FINITE_FRAMES,
-    UNLABELED_NUMERIC_LABEL_BASE,
 )
 from .errors import (
     ERR_AUTO_DROP_INVALID_THRESHOLD,
@@ -28,6 +33,7 @@ from .errors import (
     ERR_DROP_COLUMN_REMOVE_ALL,
     ERR_EXTRA_STATIONARY_INVALID,
     ERR_EXTRA_STATIONARY_REMOVE_ALL,
+    ERR_OBSTACLE_MODE,
     ERR_SKIP_LABEL_EMPTY_TEMPLATE,
     ERR_SKIP_LABEL_OBSTACLE,
     ERR_SKIP_LABEL_UNKNOWN,
@@ -42,6 +48,7 @@ from .screening import (
 )
 from .obstacle import (
     detect_obstacle_markers,
+    detect_obstacle_markers_rod_pair,
     remap_indices_after_screened_drops,
     screened_indices_extra_stationary_to_drop,
 )
@@ -227,7 +234,15 @@ def run_pipeline(
     dynamic_path: str,
     out_prefix: str,
     *,
-    obstacle_visibility_min: float = DEFAULT_OBSTACLE_VISIBILITY_MIN,
+    obstacle_visibility_min: float = DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
+    obstacle_max_motion_mm: float | None = None,
+    obstacle_detection_mode: str = "rod_pair",
+    obstacle_visibility_floor: float = DEFAULT_OBSTACLE_VISIBILITY_FLOOR,
+    obstacle_rod_separation_axis: str = "y",
+    obstacle_rod_length_min_mm: float = DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM,
+    obstacle_rod_length_target_mm: float | None = None,
+    obstacle_rod_max_pair_candidates: int = DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
+    obstacle_rod_min_overlap_frames: int = DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
     use_pelvis_frame: bool = False,
     static_facing_axis: str | None = None,
     dynamic_facing_axis: str | None = None,
@@ -263,7 +278,24 @@ def run_pipeline(
     static_path : path to labeled static C3D
     dynamic_path : path to unlabeled dynamic C3D
     out_prefix : output path prefix (e.g. "out/trial_01")
-    obstacle_visibility_min : min visibility for obstacle candidates
+    obstacle_visibility_min : min visibility for obstacle candidates (default
+        ``DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN`` = 0.72; use a higher value with
+        ``obstacle_detection_mode="legacy"`` if needed)
+    obstacle_max_motion_mm : max mean inter-frame displacement (mm/frame) for obstacle candidates;
+        same statistic as ``motion_score_per_marker``. ``None`` uses ``DEFAULT_OBSTACLE_MAX_MOTION_MM``
+        (5.0). Use ``0`` to disable the motion upper bound (legacy behavior).
+        For ``obstacle_detection_mode="rod_pair"``, the cap applies to **median** inter-frame speed.
+    obstacle_detection_mode : ``"legacy"`` (lowest-mean-motion pair among visibility/motion-qualified
+        columns) or ``"rod_pair"`` (rod geometry: lateral spread vs axial separation + median motion).
+    obstacle_visibility_floor : in ``rod_pair`` mode, columns below this visibility are excluded
+        before pairing (junk channels).
+    obstacle_rod_separation_axis : lab axis along which the rod is oriented (``"x"``, ``"y"``, or
+        ``"z"``). Lateral spread uses the other two axes.
+    obstacle_rod_length_min_mm : minimum axial separation (mm) for a valid obstacle pair.
+    obstacle_rod_length_target_mm : optional soft target for axial separation (same rod across trials).
+    obstacle_rod_max_pair_candidates : only the lowest-median-motion K columns enter pairwise search.
+    obstacle_rod_min_overlap_frames : minimum simultaneous finite-XYZ frames for a pair when
+        computing mean positions for rod geometry.
     use_pelvis_frame : build template in pelvis frame (default False = lab frame)
     static_facing_axis : lab axis subject faces in static: 'x', '-x', 'y', '-y' (optional)
     dynamic_facing_axis : lab axis subject faces in dynamic (optional). If both set and
@@ -392,16 +424,63 @@ def run_pipeline(
     d_back, d_right = get_lr_ap_axes_from_walking(wdx)
 
     # Step 4: Obstacle detection on screened dynamic; L/R by y-axis (walking along x)
-    obstacle_indices, obstacle_labels = detect_obstacle_markers(
-        points_d,
-        visibility_min=obstacle_visibility_min,
-        lr_axis="y",
-    )
+    _mode = str(obstacle_detection_mode).strip().lower()
+    if _mode == "rod_pair":
+        obstacle_indices, obstacle_labels = detect_obstacle_markers_rod_pair(
+            points_d,
+            visibility_min=obstacle_visibility_min,
+            visibility_floor=obstacle_visibility_floor,
+            motion_max_mm=obstacle_max_motion_mm,
+            rod_separation_axis=obstacle_rod_separation_axis,
+            rod_length_min_mm=obstacle_rod_length_min_mm,
+            rod_length_target_mm=obstacle_rod_length_target_mm,
+            rod_max_pair_candidates=obstacle_rod_max_pair_candidates,
+            rod_min_overlap_frames=obstacle_rod_min_overlap_frames,
+            lr_axis="y",
+        )
+    elif _mode == "legacy":
+        obstacle_indices, obstacle_labels = detect_obstacle_markers(
+            points_d,
+            visibility_min=obstacle_visibility_min,
+            lr_axis="y",
+            motion_max_mm=obstacle_max_motion_mm,
+        )
+    else:
+        raise LabelingPipelineError(
+            ERR_OBSTACLE_MODE,
+            f"obstacle_detection_mode must be 'legacy' or 'rod_pair', got {obstacle_detection_mode!r}.",
+            step="obstacle",
+        )
+
     if require_obstacles and len(obstacle_indices) < 2:
+        _cap = (
+            DEFAULT_OBSTACLE_MAX_MOTION_MM
+            if obstacle_max_motion_mm is None
+            else float(obstacle_max_motion_mm)
+        )
+        _cap_note = (
+            "no motion cap"
+            if _cap <= 0
+            else (
+                f"median inter-frame displacement ≤ {_cap:g} mm/frame"
+                if _mode == "rod_pair"
+                else f"mean inter-frame displacement ≤ {_cap:g} mm/frame"
+            )
+        )
+        if _mode == "rod_pair":
+            detail = (
+                f"rod_pair: need 2 candidates (visibility floor {obstacle_visibility_floor:.0%}, "
+                f"min visibility {obstacle_visibility_min:.0%}, {_cap_note}) "
+                f"and a pair with axial separation ≥ {obstacle_rod_length_min_mm:g} mm "
+                f"on axis {obstacle_rod_separation_axis!r}."
+            )
+        else:
+            detail = (
+                f"visibility >= {obstacle_visibility_min:.0%}, {_cap_note}, then lowest motion."
+            )
         raise ScreeningError(
             4,
-            f"could not detect 2 obstacle markers (found {len(obstacle_indices)} with "
-            f"visibility >= {obstacle_visibility_min:.0%} and lowest motion).",
+            f"could not detect 2 obstacle markers (found {len(obstacle_indices)}; {detail})",
         )
 
     dropped_extra_stationary_loaded: list[int] = []
@@ -626,4 +705,5 @@ def run_pipeline(
         "n_finite_xyz_at_best_frame": n_finite_xyz_best,
         "auto_dropped_loaded_column_indices": auto_dropped_loaded_indices,
         "dropped_extra_stationary_loaded_indices": dropped_extra_stationary_loaded,
+        "obstacle_detection_mode": _mode,
     }

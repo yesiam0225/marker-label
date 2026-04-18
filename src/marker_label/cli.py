@@ -5,7 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .constants import DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM
+from .constants import (
+    DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM,
+    DEFAULT_OBSTACLE_MAX_MOTION_MM,
+    DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM,
+    DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
+    DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
+    DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
+    DEFAULT_OBSTACLE_VISIBILITY_FLOOR,
+)
 
 
 def main() -> None:
@@ -28,9 +36,89 @@ def main() -> None:
     parser.add_argument(
         "--obstacle-visibility",
         type=float,
-        default=0.80,
+        default=DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
         metavar="FRAC",
-        help="Min visibility for obstacle candidates (default: 0.80)",
+        help=(
+            f"Min visibility for obstacle candidates (default: {DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN}, "
+            "aligned with rod_pair). Use e.g. 0.80 with --obstacle-mode legacy if needed."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-max-motion-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            f"Obstacle candidates only if mean inter-frame displacement ≤ MM mm/frame "
+            f"(same as motion_score). Omitted uses default {DEFAULT_OBSTACLE_MAX_MOTION_MM} mm/frame. "
+            "Use 0 to disable the cap (legacy behavior)."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-mode",
+        type=str,
+        default="rod_pair",
+        choices=("legacy", "rod_pair"),
+        help=(
+            "Obstacle detection: legacy (two lowest mean-motion columns among qualified) or "
+            "rod_pair (median motion + rod geometry: lateral spread vs axial separation). "
+            "For rod_pair, you may need a lower --obstacle-visibility (e.g. 0.72) if one endpoint "
+            "has dropouts."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-visibility-floor",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help=(
+            "Rod mode: exclude columns with visibility below this before pairing "
+            f"(default {DEFAULT_OBSTACLE_VISIBILITY_FLOOR})."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-axis",
+        type=str,
+        default="y",
+        choices=("x", "y", "z"),
+        help="Rod mode: lab axis along the bar (separation axis; default y).",
+    )
+    parser.add_argument(
+        "--obstacle-rod-length-min-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Rod mode: minimum axial separation (mm) for a valid pair "
+            f"(default {DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM})."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-length-target-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Rod mode: optional soft target axial separation (mm) for the same rod across trials.",
+    )
+    parser.add_argument(
+        "--obstacle-rod-max-candidates",
+        type=int,
+        default=None,
+        metavar="K",
+        help=(
+            "Rod mode: only the K lowest-median-motion columns enter pairwise search "
+            f"(default {DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES})."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-min-overlap-frames",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Rod mode: minimum simultaneous finite-XYZ frames for pair geometry "
+            f"(default {DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES})."
+        ),
     )
     parser.add_argument(
         "--max-interp-frames",
@@ -240,11 +328,39 @@ def main() -> None:
 
     try:
         from .pipeline import run_pipeline
+        _vf = (
+            args.obstacle_visibility_floor
+            if args.obstacle_visibility_floor is not None
+            else DEFAULT_OBSTACLE_VISIBILITY_FLOOR
+        )
+        _rmin = (
+            args.obstacle_rod_length_min_mm
+            if args.obstacle_rod_length_min_mm is not None
+            else DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM
+        )
+        _rk = (
+            args.obstacle_rod_max_candidates
+            if args.obstacle_rod_max_candidates is not None
+            else DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES
+        )
+        _rov = (
+            args.obstacle_rod_min_overlap_frames
+            if args.obstacle_rod_min_overlap_frames is not None
+            else DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES
+        )
         info = run_pipeline(
             args.static,
             args.dynamic,
             out_prefix,
             obstacle_visibility_min=args.obstacle_visibility,
+            obstacle_max_motion_mm=args.obstacle_max_motion_mm,
+            obstacle_detection_mode=args.obstacle_mode,
+            obstacle_visibility_floor=_vf,
+            obstacle_rod_separation_axis=args.obstacle_rod_axis,
+            obstacle_rod_length_min_mm=_rmin,
+            obstacle_rod_length_target_mm=args.obstacle_rod_length_target_mm,
+            obstacle_rod_max_pair_candidates=_rk,
+            obstacle_rod_min_overlap_frames=_rov,
             static_facing_axis=args.static_facing,
             dynamic_facing_axis=args.dynamic_facing,
             static_scale=static_scale,

@@ -61,6 +61,22 @@ OBSTACLE_LABELS = ("OBSTACLE_L", "OBSTACLE_R")
 # Default visibility threshold for obstacle candidates (fraction of frames)
 DEFAULT_OBSTACLE_VISIBILITY_MIN = 0.80
 
+# Obstacle candidates must also have mean inter-frame speed <= this (mm/frame). Same statistic as
+# motion_score_per_marker. Pass 0 to detect_obstacle_markers to disable the cap (legacy behavior).
+DEFAULT_OBSTACLE_MAX_MOTION_MM = 5.0
+
+# --- Rod-pair obstacle mode (``detect_obstacle_markers_rod_pair``) ---
+# Relaxed visibility default when using rod geometry; still excludes junk via FLOOR.
+DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN = 0.72
+# Columns below this visibility are never obstacle candidates (avoids "fake stationary" channels).
+DEFAULT_OBSTACLE_VISIBILITY_FLOOR = 0.55
+# Minimum separation (mm) along the rod axis between the two endpoints for a valid pair.
+DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM = 400.0
+# Only the lowest-motion K screened columns are considered for pairwise rod scoring (then all pairs).
+DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES = 12
+# Minimum simultaneous finite-XYZ frames for a pair when computing mean positions for rod geometry.
+DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES = 50
+
 # After obstacle detection: drop non-obstacle screened columns with mean inter-frame speed
 # below this (mm/frame) and visibility >= obstacle threshold. Omit run_pipeline argument or pass
 # None to use this value — that is the standard pipeline behavior when two obstacles are detected.
