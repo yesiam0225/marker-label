@@ -95,7 +95,7 @@ SCREENING_Y_MAX_MM = 1500
 # frames with Y outside [y_min, y_max] exceeds this (denominator = count of finite Y).
 SCREENING_Y_MIN_FINITE_FRAMES = 5
 SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD = 0.40
-SCREENING_VISIBILITY_MIN = 0.40  # Step 2: drop columns with visibility < this
+SCREENING_VISIBILITY_MIN = 0.30  # Step 2: drop columns with visibility < this
 # Expected marker count after screening: 39 body + 2 obstacles (raise if different)
 EXPECTED_SCREENED_MARKERS = 41  # 39 body + 2 obstacles
 SCREENING_BEST_FRAME_VISIBILITY_MIN = 0.95  # Step 5: frame must have >= this fraction valid
