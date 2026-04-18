@@ -35,6 +35,9 @@ CLAVRBAK_RBAK_NOT_POSTERIOR_TO_CLAV = "RBAK_NOT_POSTERIOR_TO_CLAV"
 CLAVRBAK_RBAK_NOT_RIGHT_OF_CLAV = "RBAK_NOT_RIGHT_OF_CLAV"
 CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE = "CLAV_OR_RBAK_OUTSIDE_SHOULDER_Y_RANGE"
 
+# Tie-break when two CLAV/RBAK candidates have nearly equal A/P (dot_back); same scale as head markers.
+_CLAV_RBAK_AP_TIE_ATOL = 1e-7
+
 
 class CLAVRBAKValidationError(Exception):
     """Raised when CLAV/RBAK labeling fails validation (Y range or RBAK posterior/right of CLAV)."""
@@ -314,16 +317,18 @@ def assign_clav_rbak_after_c7_shoulders(
 ) -> list[tuple[int, str]]:
     """
     After C7 and shoulders: among remaining points with Y between the two shoulders
-    (min/max of LSHO_y and RSHO_y on this frame), take the two highest Z; assign
-    highest Z = CLAV, next-highest Z = RBAK. Then validate: RBAK must be posterior and
-    right of CLAV, and both must lie in the shoulder Y range; otherwise raise
+    (min/max of LSHO_y and RSHO_y on this frame), take the two highest Z as candidates.
+    Assign CLAV/RBAK by A/P like head markers: XY centroid of the two candidates,
+    project onto d_back_xy — smaller dot_back = anterior = CLAV, larger = posterior = RBAK.
+    If dot_back is tied within tolerance, higher Z = CLAV. Then validate: RBAK must be
+    posterior and right of CLAV, and both must lie in the shoulder Y range; otherwise raise
     CLAVRBAKValidationError with an error code.
 
     Parameters
     ----------
     points_frame : (n_points, 3)
-    d_back_xy : (2,) xy unit vector toward posterior (used only for validation)
-    d_right_xy : (2,) xy unit vector toward subject's right (used only for validation)
+    d_back_xy : (2,) xy unit vector toward posterior (assignment + validation)
+    d_right_xy : (2,) xy unit vector toward subject's right (validation)
     exclude_pt_indices : point indices already assigned (head + C7 + shoulders)
     lsho_idx, rsho_idx : point indices for LSHO and RSHO (used for Y range on this frame)
     template : for label strings CLAV, RBAK
@@ -360,9 +365,21 @@ def assign_clav_rbak_after_c7_shoulders(
     if len(top2) == 1:
         out.append((top2[0], label_clav))
         return out
-    # Assign by Z order only: highest Z = CLAV, next = RBAK
-    clav_idx = top2[0]
-    rbak_idx = top2[1]
+    i_idx, j_idx = top2[0], top2[1]
+    xy_i = np.asarray(points_frame[i_idx, :2], dtype=np.float64)
+    xy_j = np.asarray(points_frame[j_idx, :2], dtype=np.float64)
+    centroid_pair_xy = np.nanmean(np.array([xy_i, xy_j]), axis=0)
+    dot_back_i = float((xy_i - centroid_pair_xy) @ d_back_xy)
+    dot_back_j = float((xy_j - centroid_pair_xy) @ d_back_xy)
+    z_i = float(points_frame[i_idx, 2])
+    z_j = float(points_frame[j_idx, 2])
+    if np.isclose(dot_back_i, dot_back_j, rtol=0.0, atol=_CLAV_RBAK_AP_TIE_ATOL):
+        # Degenerate / numerical tie: higher Z = CLAV (legacy Z-first convention)
+        clav_idx, rbak_idx = (i_idx, j_idx) if z_i >= z_j else (j_idx, i_idx)
+    elif dot_back_i < dot_back_j:
+        clav_idx, rbak_idx = i_idx, j_idx
+    else:
+        clav_idx, rbak_idx = j_idx, i_idx
     clav_pt = points_frame[clav_idx]
     rbak_pt = points_frame[rbak_idx]
     # Validation: RBAK must be posterior and right of CLAV; both in shoulder Y range
@@ -1355,7 +1372,7 @@ def label_body_markers(
                 template,
             )
             priority_pt_set = head_pt_set | {pi for pi, _ in c7_shoulder_assignments}
-        # CLAV and RBAK: next 2 Z among points with Y between shoulders ± 15 mm; anterior = CLAV, posterior = RBAK
+        # CLAV and RBAK: top 2 Z in shoulder Y band; assign by A/P (centroid dot_back), then validate
         clav_rbak_assignments: list[tuple[int, str]] = []
         use_clav_rbak_by_z = (
             use_c7_shoulder_by_z
