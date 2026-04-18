@@ -628,7 +628,15 @@ def assign_leg_foot12_after_pelvis_arm12(
     clav_idx: int,
     template: dict,
 ) -> list[tuple[int, str]]:
-    """After pelvis/arm12: remaining points top 12 by Z. Split L/R by CLAV Y (left 6, right 6). Per side: Z desc top 3 -> THI,KNE,TIB; among the three lowest-Z points, ANK = max |Y - Y_CLAV|; remaining two -> A/P by projection on d_back_xy (smaller = anterior = TOE, larger = posterior = HEE; same convention as head). Logs error codes on failure."""
+    """After pelvis/arm12: remaining points top 12 by Z. Split L/R by CLAV Y (left 6, right 6).
+
+    Per side: Z desc top 3 -> THI, KNE, TIB; among the three lowest-Z (foot) points:
+    primary rule uses **Euclidean distances**: the pair with **maximum** separation is HEE and TOE
+    (foot length); the **remaining** point is ANK. Between that pair, **A/P** uses projection on
+    ``d_back_xy`` (smaller dot = anterior = TOE, larger = posterior = HEE; same convention as head).
+    This is more robust than the previous |Y − Y_CLAV| rule when the foot is toe-out. Logs error
+    codes on failure.
+    """
     logger = logging.getLogger(__name__)
     if clav_idx < 0 or not np.isfinite(points_frame[clav_idx, 1]):
         logger.warning("LEG_FOOT12_CLAV_INVALID: CLAV marker position invalid or missing; cannot split left/right by CLAV.")
@@ -681,26 +689,32 @@ def assign_leg_foot12_after_pelvis_arm12(
             (six_pts[order_z_side[2]], label_tib),
         ]
         foot_three = [six_pts[order_z_side[3]], six_pts[order_z_side[4]], six_pts[order_z_side[5]]]
-        y_dists = np.array([abs(float(points_frame[i, 1]) - clav_y) if np.isfinite(points_frame[i, 1]) else np.nan for i in foot_three])
-        if np.all(~np.isfinite(y_dists)):
-            logger.warning("LEG_FOOT12_ANK_Y_INVALID: All three foot candidates have invalid Y; falling back to 4th-by-Z as ANK.")
-            i_ank = 0
-        else:
-            i_ank = int(np.nanargmax(y_dists))
-        ank_idx = foot_three[i_ank]
-        foot_two = [foot_three[j] for j in range(3) if j != i_ank]
-        out.append((ank_idx, label_ank))
-        if len(foot_two) != 2:
-            logger.warning("LEG_FOOT12_FOOT_NOT_2: Expected 2 foot points remaining on one side, got %d.", len(foot_two))
+        pts3 = np.stack([points_frame[i] for i in foot_three], axis=0)
+        if not np.isfinite(pts3).all():
+            logger.warning("LEG_FOOT12_FOOT3_INVALID: Foot candidates have non-finite coordinates.")
             return out
-        dot_back = np.array([float(points_frame[i, :2] @ d_back_xy) for i in foot_two])
+        pair_edges = (
+            (0, 1, float(np.linalg.norm(pts3[0] - pts3[1]))),
+            (0, 2, float(np.linalg.norm(pts3[0] - pts3[2]))),
+            (1, 2, float(np.linalg.norm(pts3[1] - pts3[2]))),
+        )
+        ia, ib, max_d = max(pair_edges, key=lambda t: t[2])
+        if not np.isfinite(max_d) or max_d <= 0:
+            logger.warning("LEG_FOOT12_FOOT_DIST_INVALID: Invalid pairwise distances among foot triple.")
+            return out
+        # Third vertex (not in the longest-distance pair) = ANK.
+        ic = ({0, 1, 2} - {ia, ib}).pop()
+        ank_idx = foot_three[ic]
+        heel_toe = [foot_three[ia], foot_three[ib]]
+        out.append((ank_idx, label_ank))
+        dot_back = np.array([float(points_frame[i, :2] @ d_back_xy) for i in heel_toe])
         if not np.all(np.isfinite(dot_back)) or dot_back[0] == dot_back[1]:
             logger.warning("LEG_FOOT12_FOOT_AP_INVALID: Foot side has invalid or identical A/P; cannot assign HEE/TOE.")
             return out
         order_ap = np.argsort(dot_back)
-        # d_back_xy points posterior: smaller dot = anterior (TOE), larger = posterior (HEE); see assign_head_markers_by_top4_z
-        out.append((foot_two[order_ap[0]], label_toe))
-        out.append((foot_two[order_ap[1]], label_hee))
+        # d_back_xy points posterior: smaller dot = anterior (TOE), larger = posterior (HEE)
+        out.append((heel_toe[order_ap[0]], label_toe))
+        out.append((heel_toe[order_ap[1]], label_hee))
         return out
 
     left_out = assign_side_six(left6, _lab("LTHI"), _lab("LKNE"), _lab("LTIB"), _lab("LANK"), _lab("LHEE"), _lab("LTOE"))
