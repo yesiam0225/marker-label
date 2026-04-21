@@ -98,8 +98,16 @@ SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD = 0.40
 SCREENING_VISIBILITY_MIN = 0.30  # Step 2: drop columns with visibility < this
 # Expected marker count after screening: 39 body + 2 obstacles (raise if different)
 EXPECTED_SCREENED_MARKERS = 41  # 39 body + 2 obstacles
-SCREENING_BEST_FRAME_VISIBILITY_MIN = 0.95  # Step 5: frame must have >= this fraction valid
-SCREENING_FOOT_PROXY_N_SMALLEST_Z = 6  # Step 5: mean of N smallest Z as foot-height proxy
+# After extra stationary drop: require at least this many screened columns (39 body + 2 obstacles).
+MIN_SCREENED_COLUMNS_AFTER_EXTRA_STATIONARY = 41
+# Body-only columns (obstacle columns removed) must be at least this many for labeling.
+MIN_BODY_MARKER_COLUMNS = 39
+# Per obstacle marker: need at least this many finite-Y frames to compute trial Y band (median/mean).
+MIN_FINITE_Y_SAMPLES_PER_OBSTACLE_MARKER = 10
+SCREENING_BEST_FRAME_VISIBILITY_MIN = 0.95  # Legacy best frame: fraction of points with valid XYZ
+# Best frame (obstacle-Y-band mode): require at least this many body markers finite and within band
+BEST_FRAME_MIN_MARKERS_IN_OBSTACLE_Y_BAND = 39
+SCREENING_FOOT_PROXY_N_SMALLEST_Z = 6  # Foot proxy: mean of N smallest Z (within obstacle Y band when enabled)
 
 # Unlabeled body columns in labeled CSV/C3D: display string is
 # (0-based loaded column index) + UNLABELED_NUMERIC_LABEL_BASE. Base 1 matches typical

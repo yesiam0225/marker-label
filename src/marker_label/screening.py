@@ -155,6 +155,7 @@ def apply_initial_screening_steps_1_and_2(
     trim_first_frame: int | None = None,
     trim_last_frame: int | None = None,
     skip_visibility_step: bool = False,
+    skip_y_range_screening: bool = True,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, int]:
     """
     Optional Step 1.5 (trim to user first/last frame), then Step 1 (Y range),
@@ -178,6 +179,8 @@ def apply_initial_screening_steps_1_and_2(
         (Step 1.5). If both set, trim to this range **before** Step 1 (Y range); if either
         is None, no frame trimming is applied.
     skip_visibility_step : if True, do not apply Step 2 (keep all columns from Step 1/1.5).
+    skip_y_range_screening : if True (default), do not apply Step 1 (fixed lab Y band column drop).
+        Set False to enable legacy Step 1 ``drop_columns_outside_y_range``.
     """
     pts = points
     residual_out = residual
@@ -190,13 +193,17 @@ def apply_initial_screening_steps_1_and_2(
             last_frame_1based=trim_last_frame,
         )
 
-    pts, keep1 = drop_columns_outside_y_range(
-        pts,
-        y_min_mm=y_min_mm,
-        y_max_mm=y_max_mm,
-        y_outside_fraction_threshold=y_outside_fraction_threshold,
-        min_finite_y_frames=min_finite_y_frames,
-    )
+    n_cols_after_trim = int(pts.shape[1])
+    if skip_y_range_screening:
+        keep1 = np.arange(n_cols_after_trim, dtype=np.int64)
+    else:
+        pts, keep1 = drop_columns_outside_y_range(
+            pts,
+            y_min_mm=y_min_mm,
+            y_max_mm=y_max_mm,
+            y_outside_fraction_threshold=y_outside_fraction_threshold,
+            min_finite_y_frames=min_finite_y_frames,
+        )
     if residual_out is not None:
         residual_out = residual_out[:, keep1]
 

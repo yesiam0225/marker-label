@@ -19,7 +19,9 @@ from .constants import (
     DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
     DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
     DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
+    MIN_FINITE_Y_SAMPLES_PER_OBSTACLE_MARKER,
 )
+from .errors import ERR_OBSTACLE_Y_BAND_INSUFFICIENT_DATA, LabelingPipelineError
 
 
 def motion_score_per_marker(points: np.ndarray) -> np.ndarray:
@@ -80,6 +82,63 @@ def visibility_fraction(points: np.ndarray) -> np.ndarray:
     """Fraction of frames where marker is valid (non-NaN). Shape (n_points,)."""
     valid = np.isfinite(points).all(axis=2)
     return np.mean(valid, axis=0)
+
+
+def trial_obstacle_y_band(
+    obstacle_points: np.ndarray,
+    *,
+    aggregate: str = "median",
+    min_finite_samples: int = MIN_FINITE_Y_SAMPLES_PER_OBSTACLE_MARKER,
+) -> tuple[float, float]:
+    """
+    Trial-wide vertical band from two stationary obstacle markers.
+
+    For each of the two endpoints, collect finite Y over all frames and take ``median`` or
+    ``mean``. Then ``y_lo = min(Y0_agg, Y1_agg)``, ``y_hi = max(Y0_agg, Y1_agg)`` (same
+    convention as the instantaneous [min, max] of the two obstacle Y values).
+
+    Parameters
+    ----------
+    obstacle_points
+        (n_frames, 2, 3) trajectories for OBSTACLE_L and OBSTACLE_R (same frame as body).
+    aggregate
+        ``\"median\"`` (default) or ``\"mean\"``.
+    min_finite_samples
+        Raise if either marker has fewer than this many frames with finite Y.
+
+    Returns
+    -------
+    y_lo, y_hi : float
+    """
+    if obstacle_points.ndim != 3 or obstacle_points.shape[1] < 2:
+        raise LabelingPipelineError(
+            ERR_OBSTACLE_Y_BAND_INSUFFICIENT_DATA,
+            "obstacle_points must have shape (n_frames, 2, 3) with two obstacle columns.",
+            step="obstacle_y_band",
+        )
+    agg = str(aggregate).strip().lower()
+    if agg not in ("median", "mean"):
+        raise ValueError(f'aggregate must be \"median\" or \"mean\", got {aggregate!r}')
+
+    y_vals = []
+    for j in range(2):
+        y = obstacle_points[:, j, 1]
+        finite = y[np.isfinite(y)]
+        if finite.size < int(min_finite_samples):
+            raise LabelingPipelineError(
+                ERR_OBSTACLE_Y_BAND_INSUFFICIENT_DATA,
+                f"obstacle marker {j} has only {finite.size} finite-Y frames; "
+                f"need >= {min_finite_samples}.",
+                step="obstacle_y_band",
+            )
+        if agg == "median":
+            y_vals.append(float(np.median(finite)))
+        else:
+            y_vals.append(float(np.mean(finite)))
+
+    y_lo = min(y_vals[0], y_vals[1])
+    y_hi = max(y_vals[0], y_vals[1])
+    return y_lo, y_hi
 
 
 def detect_obstacle_markers(

@@ -24,6 +24,7 @@ from .constants import (
     TRUNK_LABELS,
 )
 from .constants import (
+    BEST_FRAME_MIN_MARKERS_IN_OBSTACLE_Y_BAND,
     SCREENING_BEST_FRAME_VISIBILITY_MIN,
     SCREENING_FOOT_PROXY_N_SMALLEST_Z,
 )
@@ -93,6 +94,21 @@ def _trunk_labels_in_template(template: dict) -> list[str]:
     return [k for k in template if str(k).strip().upper() in _TRUNK_SET]
 
 
+def _indices_outside_fixed_y_band(
+    points_frame: np.ndarray,
+    y_lo: float,
+    y_hi: float,
+) -> set[int]:
+    """Body column indices where Y is not in [y_lo, y_hi] or Y is non-finite."""
+    n = int(points_frame.shape[0])
+    out: set[int] = set()
+    for i in range(n):
+        y = points_frame[i, 1]
+        if not np.isfinite(y) or y < y_lo or y > y_hi:
+            out.add(i)
+    return out
+
+
 def _indices_outside_obstacle_y_span(
     points_frame: np.ndarray,
     obstacle_two_points: np.ndarray | None,
@@ -109,13 +125,7 @@ def _indices_outside_obstacle_y_span(
     if not (np.isfinite(y0) and np.isfinite(y1)):
         return set()
     y_lo, y_hi = min(y0, y1), max(y0, y1)
-    n = int(points_frame.shape[0])
-    out: set[int] = set()
-    for i in range(n):
-        y = points_frame[i, 1]
-        if not np.isfinite(y) or y < y_lo or y > y_hi:
-            out.add(i)
-    return out
+    return _indices_outside_fixed_y_band(points_frame, y_lo, y_hi)
 
 
 def assign_head_markers_by_top4_z(
@@ -919,22 +929,32 @@ def best_frame_by_foot_stability(
     middle_start: float = DEFAULT_MIDDLE_START,
     middle_end: float = DEFAULT_MIDDLE_END,
     visibility_min: float = SCREENING_BEST_FRAME_VISIBILITY_MIN,
+    obstacle_y_lo_hi: tuple[float, float] | None = None,
+    min_markers_in_obstacle_y: int = BEST_FRAME_MIN_MARKERS_IN_OBSTACLE_Y_BAND,
     n_smallest_z: int = SCREENING_FOOT_PROXY_N_SMALLEST_Z,
     fallback_fn=None,
 ) -> int:
     """
-    Step 5: Choose frame in middle with ≥visibility_min valid points and minimal |v_foot|.
+    Choose a "best" frame in the middle portion of the trial.
 
-    Foot-height proxy = mean of the n_smallest_z smallest Z values per frame (feet on ground).
-    v_foot(t) = central difference of this proxy; minimize |v_foot| for both feet on ground.
+    **Default (obstacle band) mode** — ``obstacle_y_lo_hi`` is ``(y_lo, y_hi)`` (trial-wide
+    band from obstacle markers): require at least ``min_markers_in_obstacle_y`` body points
+    with finite XYZ and Y in ``[y_lo, y_hi]``; foot proxy uses only those in-band points
+    (mean of ``n_smallest_z`` smallest Z among them). Pick the candidate frame with
+    minimal ``|v_foot|`` (central difference of the foot-height proxy).
+
+    **Legacy mode** — ``obstacle_y_lo_hi`` is ``None``: require fraction of valid XYZ points
+    ``>= visibility_min`` (all points), foot proxy from global smallest Z (original behavior).
 
     Parameters
     ----------
     points : (n_frames, n_points, 3)
     middle_start, middle_end : fraction of frames for middle portion
-    visibility_min : require this fraction of points valid in the frame (e.g. 0.95)
-    n_smallest_z : number of smallest Z values to average for foot proxy
-    fallback_fn : callable(points, **kwargs) -> int; used when no frame meets visibility_min
+    visibility_min : legacy mode only; min fraction of points with valid XYZ (e.g. 0.95)
+    obstacle_y_lo_hi : if set, (y_lo, y_hi) in lab mm for obstacle vertical band
+    min_markers_in_obstacle_y : obstacle-band mode: minimum count of in-band valid points
+    n_smallest_z : number of smallest in-band Z values to average for foot proxy
+    fallback_fn : callable(points, **kwargs) -> int when no frame meets criteria
 
     Returns
     -------
@@ -947,36 +967,67 @@ def best_frame_by_foot_stability(
     end = max(start + 1, min(end, n_frames))
     candidates = list(range(start, end))
 
-    # Per-frame: fraction valid, and foot proxy (mean of n_smallest_z smallest Z)
-    valid_per_frame = np.isfinite(points).all(axis=2)  # (n_frames, n_points)
-    n_valid_per_frame = np.sum(valid_per_frame, axis=1)
-    frac_valid = n_valid_per_frame / n_points if n_points > 0 else np.zeros(n_frames)
-
     z_foot = np.full(n_frames, np.nan)
-    for f in range(n_frames):
-        z_vals = points[f, :, 2].copy()
-        z_vals[~np.isfinite(z_vals)] = np.nan
-        finite = np.isfinite(z_vals)
-        if np.sum(finite) >= n_smallest_z:
-            smallest = np.partition(z_vals[finite], min(n_smallest_z - 1, np.sum(finite) - 1))[:n_smallest_z]
-            z_foot[f] = np.mean(smallest)
 
-    # Central difference for v_foot; at boundaries use one-sided or inf
+    if obstacle_y_lo_hi is not None:
+        y_lo, y_hi = float(obstacle_y_lo_hi[0]), float(obstacle_y_lo_hi[1])
+        n_valid_per_frame = np.zeros(n_frames, dtype=np.int64)
+        for f in range(n_frames):
+            n_in = 0
+            z_list: list[float] = []
+            for i in range(n_points):
+                p = points[f, i, :]
+                if not np.isfinite(p).all():
+                    continue
+                y = float(p[1])
+                if y < y_lo or y > y_hi:
+                    continue
+                n_in += 1
+                z_list.append(float(p[2]))
+            n_valid_per_frame[f] = n_in
+            if n_in >= min_markers_in_obstacle_y and len(z_list) >= n_smallest_z:
+                z_arr = np.asarray(z_list, dtype=np.float64)
+                k = min(n_smallest_z, z_arr.size)
+                smallest = np.partition(z_arr, k - 1)[:k]
+                z_foot[f] = float(np.mean(smallest))
+            elif n_in >= min_markers_in_obstacle_y and len(z_list) >= 1:
+                # Fewer than n_smallest_z in band: use all in-band Z for proxy
+                z_foot[f] = float(np.mean(z_list))
+    else:
+        valid_per_frame = np.isfinite(points).all(axis=2)
+        n_valid_per_frame = np.sum(valid_per_frame, axis=1)
+        frac_valid = n_valid_per_frame / n_points if n_points > 0 else np.zeros(n_frames)
+        for f in range(n_frames):
+            z_vals = points[f, :, 2].copy()
+            z_vals[~np.isfinite(z_vals)] = np.nan
+            finite = np.isfinite(z_vals)
+            if np.sum(finite) >= n_smallest_z:
+                smallest = np.partition(z_vals[finite], min(n_smallest_z - 1, np.sum(finite) - 1))[
+                    :n_smallest_z
+                ]
+                z_foot[f] = np.mean(smallest)
+
     v_foot = np.full(n_frames, np.inf)
     for f in range(1, n_frames - 1):
         if np.isfinite(z_foot[f - 1]) and np.isfinite(z_foot[f + 1]):
             v_foot[f] = (z_foot[f + 1] - z_foot[f - 1]) / 2.0
 
-    # Restrict to candidates with visibility >= visibility_min and finite |v_foot|
-    good = [
-        f for f in candidates
-        if frac_valid[f] >= visibility_min and np.isfinite(v_foot[f])
-    ]
+    if obstacle_y_lo_hi is not None:
+        good = [
+            f for f in candidates
+            if int(n_valid_per_frame[f]) >= int(min_markers_in_obstacle_y) and np.isfinite(v_foot[f])
+        ]
+    else:
+        frac_valid = n_valid_per_frame / n_points if n_points > 0 else np.zeros(n_frames)
+        good = [
+            f for f in candidates
+            if frac_valid[f] >= visibility_min and np.isfinite(v_foot[f])
+        ]
+
     if good:
         return int(min(good, key=lambda f: np.abs(v_foot[f])))
     if fallback_fn is not None:
         return fallback_fn(points, middle_start=middle_start, middle_end=middle_end)
-    # Last resort: middle frame
     return int(candidates[len(candidates) // 2])
 
 
@@ -1354,6 +1405,7 @@ def label_body_markers(
     d_right_xy: np.ndarray | None = None,
     column_fixed_labels: bool = False,
     obstacle_points_dynamic: np.ndarray | None = None,
+    obstacle_y_lo_hi: tuple[float, float] | None = None,
     skipped_label_names: Sequence[str] | None = None,
     assignment_trace: list[tuple[str, list[tuple[int, str]]]] | None = None,
     trace_marker_names: Collection[str] | None = None,
@@ -1386,11 +1438,12 @@ def label_body_markers(
     d_back_xy, d_right_xy : optional (2,) xy vectors from get_lr_ap_axes_from_walking. When both
         provided, head markers (LFHD, RFHD, LBHD, RBHD) are assigned at best frame by top 4 Z and
         L/R (d_right), A/P (d_back); remaining points/labels then use Z-band matching.
-    obstacle_points_dynamic : optional (n_frames, 2, 3) trajectories for OBSTACLE_L and OBSTACLE_R
-        in the same coordinate frame as ``points_dynamic`` (including any static/dynamic facing
-        rotation applied in the pipeline). At the labeling frame, body columns whose Y lies outside
-        [min(obstacle Y), max(obstacle Y)] are excluded from candidates. Omitted or non-finite
-        obstacles at that frame: no extra exclusion.
+    obstacle_points_dynamic : optional (n_frames, 2, 3) trajectories for OBSTACLE_L and OBSTACLE_R.
+    obstacle_y_lo_hi : optional ``(y_lo, y_hi)`` trial-wide vertical band (same coords as body;
+        typically median Y per obstacle endpoint from the full trial). When set, candidate
+        exclusion at the labeling frame uses this fixed band (consistent with best-frame selection).
+        When omitted but ``obstacle_points_dynamic`` is set, exclusion uses instantaneous
+        [min(Y_L), max(Y_R)] at the labeling frame (legacy).
     skipped_label_names : optional anatomical names (e.g. from ``skip_label_names`` in the pipeline)
         to omit in axis-based steps (STRN/T10/arm, pelvis/arm12, leg/foot12); those points are
         matched later via Z-band / Hungarian instead of using a fallback string.
@@ -1446,6 +1499,7 @@ def label_body_markers(
             points_dynamic,
             middle_start=middle_start,
             middle_end=middle_end,
+            obstacle_y_lo_hi=obstacle_y_lo_hi,
             fallback_fn=_fallback,
         )
     elif len(trunk_labels) >= 3:
@@ -1463,7 +1517,10 @@ def label_body_markers(
         )
 
     obstacle_y_exclude: set[int] = set()
-    if obstacle_points_dynamic is not None and int(obstacle_points_dynamic.shape[0]) > best_f:
+    if obstacle_y_lo_hi is not None:
+        y_lo, y_hi = float(obstacle_y_lo_hi[0]), float(obstacle_y_lo_hi[1])
+        obstacle_y_exclude = _indices_outside_fixed_y_band(points_dynamic[best_f], y_lo, y_hi)
+    elif obstacle_points_dynamic is not None and int(obstacle_points_dynamic.shape[0]) > best_f:
         obstacle_y_exclude = _indices_outside_obstacle_y_span(
             points_dynamic[best_f],
             obstacle_points_dynamic[best_f],

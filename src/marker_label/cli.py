@@ -181,14 +181,31 @@ def main() -> None:
     parser.add_argument(
         "--no-check-screened-count",
         action="store_true",
-        help="Do not require exactly 41 columns after screening (use for trials with different channel count).",
+        help=(
+            "Do not require at least 41 screened columns after extra stationary drop "
+            "(use for trials with different channel count)."
+        ),
+    )
+    parser.add_argument(
+        "--y-range-screening",
+        action="store_true",
+        help=(
+            "Enable Step 1: drop columns by fixed lab Y band (±1.5 m rule). "
+            "Default: Step 1 is skipped."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-y-aggregate",
+        choices=("median", "mean"),
+        default="median",
+        help="Trial-wide vertical band from obstacle markers: median or mean Y per endpoint (default: median).",
     )
     parser.add_argument(
         "--skip-visibility-screening",
         action="store_true",
         help=(
             "Skip Step 2: do not drop columns by per-column visibility fraction "
-            "(after Step 1 Y screening and optional frame trim)."
+            "(after optional Step 1 Y screening and optional frame trim)."
         ),
     )
     parser.add_argument(
@@ -383,6 +400,8 @@ def main() -> None:
             trim_first_frame=args.first_frame,
             trim_last_frame=args.last_frame,
             skip_visibility_screening=args.skip_visibility_screening,
+            skip_y_range_screening=not args.y_range_screening,
+            obstacle_y_aggregate=args.obstacle_y_aggregate,
             y_outside_fraction_threshold=args.y_outside_fraction,
             min_finite_y_frames=args.min_finite_y_frames,
             unlabeled_numeric_base=args.unlabeled_label_base,

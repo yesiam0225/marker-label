@@ -18,7 +18,8 @@ from .constants import (
     DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
     DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
     DEFAULT_OBSTACLE_VISIBILITY_FLOOR,
-    EXPECTED_SCREENED_MARKERS,
+    MIN_BODY_MARKER_COLUMNS,
+    MIN_SCREENED_COLUMNS_AFTER_EXTRA_STATIONARY,
     OBSTACLE_LABELS,
     SCREENING_Y_MIN_FINITE_FRAMES,
     SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD,
@@ -29,11 +30,13 @@ from .constants import (
 from .errors import (
     ERR_AUTO_DROP_INVALID_THRESHOLD,
     ERR_AUTO_DROP_REMOVE_ALL,
+    ERR_BODY_COLUMNS_LT_MIN,
     ERR_DROP_COLUMN_OUT_OF_RANGE,
     ERR_DROP_COLUMN_REMOVE_ALL,
     ERR_EXTRA_STATIONARY_INVALID,
     ERR_EXTRA_STATIONARY_REMOVE_ALL,
     ERR_OBSTACLE_MODE,
+    ERR_SCREENED_COLUMNS_LT_MIN,
     ERR_SKIP_LABEL_EMPTY_TEMPLATE,
     ERR_SKIP_LABEL_OBSTACLE,
     ERR_SKIP_LABEL_UNKNOWN,
@@ -51,6 +54,7 @@ from .obstacle import (
     detect_obstacle_markers_rod_pair,
     remap_indices_after_screened_drops,
     screened_indices_extra_stationary_to_drop,
+    trial_obstacle_y_band,
 )
 from .body_labeling import build_template_from_static, label_body_markers
 from .static_geometry import (
@@ -260,6 +264,8 @@ def run_pipeline(
     trim_first_frame: int | None = None,
     trim_last_frame: int | None = None,
     skip_visibility_screening: bool = False,
+    skip_y_range_screening: bool = True,
+    obstacle_y_aggregate: str = "median",
     y_outside_fraction_threshold: float | None = None,
     min_finite_y_frames: int | None = None,
     unlabeled_numeric_base: int | None = None,
@@ -310,9 +316,12 @@ def run_pipeline(
     max_interp_frames : gap-fill threshold
     require_obstacles : if True, raise ScreeningError (Step 4) when fewer than 2 obstacle
         markers are detected (default False).
-    check_screened_count : if True (default), raise ScreeningError (Step 2) when screened
-        column count is not EXPECTED_SCREENED_MARKERS (41). Set False to run on trials
-        with different channel count (e.g. for head-only check).
+    check_screened_count : if True (default), after extra stationary drop require at least
+        ``MIN_SCREENED_COLUMNS_AFTER_EXTRA_STATIONARY`` (41) screened columns. Set False to skip.
+    skip_y_range_screening : if True (default), skip Step 1 (fixed lab Y band column drop).
+        Set False to enable legacy Step 1 ``drop_columns_outside_y_range``.
+    obstacle_y_aggregate : ``\"median\"`` or ``\"mean\"`` for trial-wide obstacle Y band
+        (``trial_obstacle_y_band``) used for best-frame selection and labeling exclusion.
     trim_first_frame, trim_last_frame : optional 1-based first/last frame to keep
         (Step 1.5). If both set, trim dynamic to this range before visibility screening.
     skip_visibility_screening : if True, skip Step 2 (do not drop columns by visibility).
@@ -392,12 +401,13 @@ def run_pipeline(
         else min_finite_y_frames
     )
 
-    # Dynamic trial initial screening (Steps 1–1.5–2): Y range, optional trim, visibility
+    # Dynamic trial initial screening (Steps 1–1.5–2): optional Y range (default off), trim, visibility
     points_d, residual_d, screening_keep, frame_trim_start = apply_initial_screening_steps_1_and_2(
         points_d, residual_d,
         trim_first_frame=trim_first_frame,
         trim_last_frame=trim_last_frame,
         skip_visibility_step=skip_visibility_screening,
+        skip_y_range_screening=skip_y_range_screening,
         y_outside_fraction_threshold=_y_frac,
         min_finite_y_frames=_y_min_fin,
     )
@@ -407,18 +417,6 @@ def run_pipeline(
     else:
         first_frame = (first_frame or 1) + frame_trim_start
     n_screened = points_d.shape[1]
-    if check_screened_count and n_screened != EXPECTED_SCREENED_MARKERS:
-        if n_screened < EXPECTED_SCREENED_MARKERS:
-            msg = (
-                f"expected {EXPECTED_SCREENED_MARKERS} marker columns (39 body + 2 obstacles) "
-                f"after screening, got {n_screened} (too few; check Y range ±1.5 m and visibility ≥50%)."
-            )
-        else:
-            msg = (
-                f"expected {EXPECTED_SCREENED_MARKERS} marker columns (39 body + 2 obstacles) "
-                f"after screening, got {n_screened} (too many; check dynamic trial channel count)."
-            )
-        raise ScreeningError(2, msg)
     # Step 3: walking direction and L/R–A/P axes (for head marker assignment)
     wdx = compute_walking_direction_x(points_d)
     d_back, d_right = get_lr_ap_axes_from_walking(wdx)
@@ -525,6 +523,17 @@ def run_pipeline(
                 f"loaded 0-based indices: {sorted(dropped_extra_stationary_loaded)}"
             )
 
+    n_screened = int(points_d.shape[1])
+    if check_screened_count and n_screened < MIN_SCREENED_COLUMNS_AFTER_EXTRA_STATIONARY:
+        raise LabelingPipelineError(
+            ERR_SCREENED_COLUMNS_LT_MIN,
+            (
+                f"after screening and extra stationary drop, need at least "
+                f"{MIN_SCREENED_COLUMNS_AFTER_EXTRA_STATIONARY} marker columns, got {n_screened}."
+            ),
+            step="screening",
+        )
+
     n_frames_d = points_d.shape[0]
     # Extract obstacle trajectories; default (n_frames, 2, 3) NaN if none
     if len(obstacle_indices) >= 2:
@@ -543,6 +552,17 @@ def run_pipeline(
         keep = list(range(points_d.shape[1]))
         points_d_body = points_d
         residual_d_body = residual_d
+
+    n_body_cols = int(points_d_body.shape[1])
+    if n_body_cols < MIN_BODY_MARKER_COLUMNS:
+        raise LabelingPipelineError(
+            ERR_BODY_COLUMNS_LT_MIN,
+            (
+                f"body marker columns after removing obstacles must be at least "
+                f"{MIN_BODY_MARKER_COLUMNS}, got {n_body_cols}."
+            ),
+            step="screening",
+        )
 
     # 2) Template from static (exclude obstacle labels if present)
     body_labels_static = [l for l in labels_s if l not in ("OBSTACLE_L", "OBSTACLE_R")]
@@ -613,6 +633,13 @@ def run_pipeline(
             points_d_body_for_matching = points_d_body @ R.T  # (n_frames, n_pts, 3)
             points_obstacle_for_matching = points_obstacle @ R.T
 
+    obstacle_y_lo_hi: tuple[float, float] | None = None
+    if len(obstacle_indices) >= 2 and int(points_obstacle_for_matching.shape[1]) >= 2:
+        obstacle_y_lo_hi = trial_obstacle_y_band(
+            points_obstacle_for_matching,
+            aggregate=obstacle_y_aggregate,
+        )
+
     # 3) Body labeling: head by top-4-Z + L/R/A/P at best frame; rest by no-arm-hand Z-band
     skip_for_axis_labeling = (
         [s.strip() for s in skip_label_names if s.strip()] if skip_label_names else None
@@ -635,6 +662,7 @@ def run_pipeline(
         fixed_best_frame=fixed_best_frame,
         column_fixed_labels=column_fixed_labels,
         obstacle_points_dynamic=points_obstacle_for_matching,
+        obstacle_y_lo_hi=obstacle_y_lo_hi,
         skipped_label_names=skip_for_axis_labeling,
     )
 
