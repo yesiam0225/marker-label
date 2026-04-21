@@ -35,6 +35,11 @@ def main() -> None:
         metavar="S",
         help="Coordinate scale after load (default 1; use 1000 if file is in meters -> mm)",
     )
+    parser.add_argument(
+        "--zero-based",
+        action="store_true",
+        help="Column names are 0,1,... (default: 1-based indices matching UNLABELED_NUMERIC_LABEL_BASE)",
+    )
     args = parser.parse_args()
 
     out = args.output
