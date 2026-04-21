@@ -185,7 +185,7 @@ def main() -> None:
             head_pt_set | {pi for pi, _ in c7_shoulder_assignments}
             | {pi for pi, _ in clav_rbak_assignments} | {pi for pi, _ in strn_t10_arm_assignments}
         )
-        pelvis_arm12_assignments = assign_pelvis_arm12_after_strn_t10_arm(
+        pelvis_arm12_assignments, _pelvis_top12 = assign_pelvis_arm12_after_strn_t10_arm(
             points_d_body[best_f],
             d_back,
             d_right,
