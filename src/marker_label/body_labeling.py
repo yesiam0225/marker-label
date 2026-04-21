@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Sequence
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
@@ -29,6 +31,23 @@ from .pelvis import build_pelvis_frame, points_to_pelvis_frame
 from . import static_geometry
 
 _TRUNK_SET = {t.upper() for t in TRUNK_LABELS}
+
+
+def _template_label_for_axis_step(
+    template: dict,
+    name: str,
+    skipped_upper: frozenset[str] | None,
+) -> str | None:
+    """
+    Resolve template key for axis-based assignment. If ``name`` is in
+    ``skipped_upper``, return None so the point can be matched later (Z-band).
+    Otherwise: template key matching ``name``, or ``name`` if absent (legacy).
+    """
+    u = name.strip().upper()
+    if skipped_upper is not None and u in skipped_upper:
+        return None
+    return next((lab for lab in template if str(lab).strip().upper() == u), name)
+
 
 # CLAV/RBAK validation error codes (raised when post-assignment checks fail)
 CLAVRBAK_RBAK_NOT_POSTERIOR_TO_CLAV = "RBAK_NOT_POSTERIOR_TO_CLAV"
@@ -74,11 +93,37 @@ def _trunk_labels_in_template(template: dict) -> list[str]:
     return [k for k in template if str(k).strip().upper() in _TRUNK_SET]
 
 
+def _indices_outside_obstacle_y_span(
+    points_frame: np.ndarray,
+    obstacle_two_points: np.ndarray | None,
+) -> set[int]:
+    """
+    Body column indices to exclude from labeling at this frame: Y not in [min, max] of the
+    two obstacle markers' Y (same lab coordinates as points_frame), or non-finite Y.
+
+    Returns empty set if obstacles are missing or not finite at this frame.
+    """
+    if obstacle_two_points is None or obstacle_two_points.shape[0] < 2:
+        return set()
+    y0, y1 = float(obstacle_two_points[0, 1]), float(obstacle_two_points[1, 1])
+    if not (np.isfinite(y0) and np.isfinite(y1)):
+        return set()
+    y_lo, y_hi = min(y0, y1), max(y0, y1)
+    n = int(points_frame.shape[0])
+    out: set[int] = set()
+    for i in range(n):
+        y = points_frame[i, 1]
+        if not np.isfinite(y) or y < y_lo or y > y_hi:
+            out.add(i)
+    return out
+
+
 def assign_head_markers_by_top4_z(
     points_frame: np.ndarray,
     d_back_xy: np.ndarray,
     d_right_xy: np.ndarray,
     head_labels: list[str] | None = None,
+    exclude_pt_indices: set[int] | None = None,
 ) -> list[tuple[int, str]]:
     """
     Assign head markers at one frame: sort points by Z descending, take top 4, then assign
@@ -94,6 +139,7 @@ def assign_head_markers_by_top4_z(
     d_back_xy : (2,) xy unit vector toward posterior
     d_right_xy : (2,) xy unit vector toward subject's right (used only for L/R sign)
     head_labels : optional list of 4 labels in order [LFHD, RFHD, LBHD, RBHD]
+    exclude_pt_indices : optional point indices not considered for top-4 Z (e.g. outside obstacle Y)
 
     Returns
     -------
@@ -101,8 +147,13 @@ def assign_head_markers_by_top4_z(
     """
     if head_labels is None:
         head_labels = list(HEAD_MARKERS)
+    ex = exclude_pt_indices or set()
     z = points_frame[:, 2]
     valid = np.isfinite(z)
+    if ex:
+        for i in ex:
+            if 0 <= i < valid.shape[0]:
+                valid[i] = False
     if np.sum(valid) < 1:
         return []
     order_z = np.argsort(-np.where(valid, z, -np.inf))[:4]
@@ -429,6 +480,8 @@ def assign_strn_t10_arm4_after_clav_rbak(
     lsho_idx: int,
     rsho_idx: int,
     template: dict,
+    *,
+    skipped_label_upper: frozenset[str] | None = None,
 ) -> list[tuple[int, str]]:
     """
     After CLAV/RBAK: from remaining points take the 6 highest Z. Two points with Y
@@ -452,19 +505,17 @@ def assign_strn_t10_arm4_after_clav_rbak(
     z_vals = np.array([points_frame[i, 2] for i in remaining])
     order_z = np.argsort(-z_vals)[:6]
     top6 = [remaining[int(k)] for k in order_z]
-    # Template labels (preserve case from template)
-    def _lab(name: str) -> str:
-        return next((lab for lab in template if str(lab).strip().upper() == name.upper()), name)
-    label_strn = _lab("STRN")
-    label_t10 = _lab("T10")
-    label_lupa = _lab("LUPA")
-    label_rupa = _lab("RUPA")
-    label_lelb = _lab("LELB")
-    label_relb = _lab("RELB")
+    label_strn = _template_label_for_axis_step(template, "STRN", skipped_label_upper)
+    label_t10 = _template_label_for_axis_step(template, "T10", skipped_label_upper)
+    label_lupa = _template_label_for_axis_step(template, "LUPA", skipped_label_upper)
+    label_rupa = _template_label_for_axis_step(template, "RUPA", skipped_label_upper)
+    label_lelb = _template_label_for_axis_step(template, "LELB", skipped_label_upper)
+    label_relb = _template_label_for_axis_step(template, "RELB", skipped_label_upper)
 
     # Two points with Y between shoulders → STRN (anterior), T10 (posterior); A/P by direct dot_back
     in_band = [i for i in top6 if y_min <= points_frame[i, 1] <= y_max]
     strn_t10_assignments: list[tuple[int, str]] = []
+    strn_t10_consumed: set[int] = set()
     if len(in_band) >= 2:
         dot_back = np.array([
             float(points_frame[i, :2] @ d_back_xy) for i in in_band
@@ -472,13 +523,19 @@ def assign_strn_t10_arm4_after_clav_rbak(
         order_ap = np.argsort(dot_back)
         anterior_pt = in_band[order_ap[0]]
         posterior_pt = in_band[order_ap[1]]
-        strn_t10_assignments = [(anterior_pt, label_strn), (posterior_pt, label_t10)]
+        strn_t10_consumed = {anterior_pt, posterior_pt}
+        strn_t10_assignments = [
+            (p, lab)
+            for p, lab in ((anterior_pt, label_strn), (posterior_pt, label_t10))
+            if lab is not None
+        ]
     elif len(in_band) == 1:
-        strn_t10_assignments = [(in_band[0], label_strn)]
+        strn_t10_consumed = {in_band[0]}
+        if label_strn is not None:
+            strn_t10_assignments = [(in_band[0], label_strn)]
 
-    # Remaining 4 from top6 (exclude the 2 used for STRN/T10)
-    strn_t10_pts = {pi for pi, _ in strn_t10_assignments}
-    arm4 = [i for i in top6 if i not in strn_t10_pts]
+    # Remaining 4 from top6 (exclude points used for STRN/T10 geometry)
+    arm4 = [i for i in top6 if i not in strn_t10_consumed]
     if len(arm4) < 4:
         return strn_t10_assignments
 
@@ -496,12 +553,14 @@ def assign_strn_t10_arm4_after_clav_rbak(
         (left_two[order_z_left[0]], label_lupa),
         (left_two[order_z_left[1]], label_lelb),
     ]
+    left_assignments = [(p, lab) for p, lab in left_assignments if lab is not None]
     z_right = np.array([points_frame[i, 2] for i in right_two])
     order_z_right = np.argsort(-z_right)
     right_assignments = [
         (right_two[order_z_right[0]], label_rupa),
         (right_two[order_z_right[1]], label_relb),
     ]
+    right_assignments = [(p, lab) for p, lab in right_assignments if lab is not None]
 
     return strn_t10_assignments + left_assignments + right_assignments
 
@@ -514,7 +573,9 @@ def assign_pelvis_arm12_after_strn_t10_arm(
     lsho_idx: int,
     rsho_idx: int,
     template: dict,
-) -> list[tuple[int, str]]:
+    *,
+    skipped_label_upper: frozenset[str] | None = None,
+) -> tuple[list[tuple[int, str]], frozenset[int] | None]:
     """
     After STRN/T10/arm4: from remaining points take the 12 highest Z.
     - 4 points with Y between LSHO and RSHO -> pelvis: A/P sort -> anterior 2 = LASI,RASI (L/R by Y), posterior 2 = LPSI,RPSI (L/R by Y).
@@ -522,12 +583,21 @@ def assign_pelvis_arm12_after_strn_t10_arm(
     - Left 4: Z max=LFRM, Z min=LFIN; middle 2 by A/P -> LWRA (anterior), LWRB (posterior).
     - Right 4: Z max=RFRM, Z min=RFIN; middle 2 by A/P -> RWRA, RWRB.
     All comparisons use point values directly (no centroid). Logs error codes on failure.
+
+    Returns
+    -------
+    assignments
+        (point_index, label) pairs from this stage only.
+    arm12_top12
+        When the 12-point pelvis+arm partition succeeds (left/right 4 each), all 12
+        body indices in that cluster so callers can exclude them from leg/foot (even
+        if some labels were skipped and left for Z-band matching).
     """
     logger = logging.getLogger(__name__)
     y_lsho = float(points_frame[lsho_idx, 1])
     y_rsho = float(points_frame[rsho_idx, 1])
     if not (np.isfinite(y_lsho) and np.isfinite(y_rsho)):
-        return []
+        return [], None
     y_min = min(y_lsho, y_rsho)
     y_max = max(y_lsho, y_rsho)
     larger_y_is_left = d_right_xy[1] < 0
@@ -541,14 +611,11 @@ def assign_pelvis_arm12_after_strn_t10_arm(
             "PELVIS_ARM12_TOO_FEW_POINTS: Fewer than 12 remaining points for pelvis/arm candidates (got %d).",
             len(remaining),
         )
-        return []
+        return [], None
 
     z_vals = np.array([points_frame[i, 2] for i in remaining])
     order_z = np.argsort(-z_vals)[:12]
     top12 = [remaining[int(k)] for k in order_z]
-
-    def _lab(name: str) -> str:
-        return next((lab for lab in template if str(lab).strip().upper() == name.upper()), name)
 
     in_band = [i for i in top12 if y_min <= points_frame[i, 1] <= y_max]
     if len(in_band) != 4:
@@ -556,7 +623,7 @@ def assign_pelvis_arm12_after_strn_t10_arm(
             "PELVIS_BAND_NOT_4: Expected 4 pelvis candidates in shoulder Y-band, got %d (y in [%.1f, %.1f]).",
             len(in_band), y_min, y_max,
         )
-        return []
+        return [], None
 
     dot_back = np.array([float(points_frame[i, :2] @ d_back_xy) for i in in_band])
     order_ap = np.argsort(dot_back)
@@ -570,16 +637,17 @@ def assign_pelvis_arm12_after_strn_t10_arm(
     else:
         order_lr_ant = np.argsort(y_ant)
         order_lr_post = np.argsort(y_post)
-    label_lasi = _lab("LASI")
-    label_rasi = _lab("RASI")
-    label_lpsi = _lab("LPSI")
-    label_rpsi = _lab("RPSI")
+    label_lasi = _template_label_for_axis_step(template, "LASI", skipped_label_upper)
+    label_rasi = _template_label_for_axis_step(template, "RASI", skipped_label_upper)
+    label_lpsi = _template_label_for_axis_step(template, "LPSI", skipped_label_upper)
+    label_rpsi = _template_label_for_axis_step(template, "RPSI", skipped_label_upper)
     pelvis_assignments = [
         (anterior_two[order_lr_ant[0]], label_lasi),
         (anterior_two[order_lr_ant[1]], label_rasi),
         (posterior_two[order_lr_post[0]], label_lpsi),
         (posterior_two[order_lr_post[1]], label_rpsi),
     ]
+    pelvis_assignments = [(p, lab) for p, lab in pelvis_assignments if lab is not None]
 
     pelvis_pts = {i for i in in_band}
     rest8 = [i for i in top12 if i not in pelvis_pts]
@@ -588,7 +656,7 @@ def assign_pelvis_arm12_after_strn_t10_arm(
             "PELVIS_ARM_MISSING_GROUP: Pelvis/arm partition incomplete: pelvis=4 rest=%d (expected 8).",
             len(rest8),
         )
-        return pelvis_assignments
+        return pelvis_assignments, None
 
     y_rest = np.array([points_frame[i, 1] for i in rest8])
     if larger_y_is_left:
@@ -598,15 +666,21 @@ def assign_pelvis_arm12_after_strn_t10_arm(
     left4 = [rest8[order_y[0]], rest8[order_y[1]], rest8[order_y[2]], rest8[order_y[3]]]
     right4 = [rest8[order_y[4]], rest8[order_y[5]], rest8[order_y[6]], rest8[order_y[7]]]
 
-    def assign_arm_side(four_pts: list[int], label_frm: str, label_wra: str, label_wrb: str, label_fin: str) -> list[tuple[int, str]]:
+    def assign_arm_side(
+        four_pts: list[int],
+        label_frm: str | None,
+        label_wra: str | None,
+        label_wrb: str | None,
+        label_fin: str | None,
+    ) -> list[tuple[int, str]]:
         if len(four_pts) < 4:
             logger.warning("ARM_SIDE_TOO_FEW_FOR_Z: Arm group has fewer than 4 points: got %d.", len(four_pts))
             return []
-        z_vals = np.array([points_frame[i, 2] for i in four_pts])
-        if np.any(~np.isfinite(z_vals)) or np.ptp(z_vals) == 0:
+        z_vals_arm = np.array([points_frame[i, 2] for i in four_pts])
+        if np.any(~np.isfinite(z_vals_arm)) or np.ptp(z_vals_arm) == 0:
             logger.warning("ARM_SIDE_INVALID_Z_ORDER: Arm side points have identical or invalid Z.")
             return []
-        order_z_desc = np.argsort(-z_vals)
+        order_z_desc = np.argsort(-z_vals_arm)
         frm_pt = four_pts[order_z_desc[0]]
         fin_pt = four_pts[order_z_desc[3]]
         mid_two = [four_pts[order_z_desc[1]], four_pts[order_z_desc[2]]]
@@ -614,27 +688,26 @@ def assign_pelvis_arm12_after_strn_t10_arm(
         order_ap_mid = np.argsort(dot_mid)
         anterior_pt = mid_two[order_ap_mid[0]]
         posterior_pt = mid_two[order_ap_mid[1]]
-        return [
+        raw = [
             (frm_pt, label_frm),
             (anterior_pt, label_wra),
             (posterior_pt, label_wrb),
             (fin_pt, label_fin),
         ]
+        return [(p, lab) for p, lab in raw if lab is not None]
 
-    label_lfrm = _lab("LFRM")
-    label_lwra = _lab("LWRA")
-    label_lwrb = _lab("LWRB")
-    label_lfin = _lab("LFIN")
-    label_rfrm = _lab("RFRM")
-    label_rwra = _lab("RWRA")
-    label_rwrb = _lab("RWRB")
-    label_rfin = _lab("RFIN")
+    label_lfrm = _template_label_for_axis_step(template, "LFRM", skipped_label_upper)
+    label_lwra = _template_label_for_axis_step(template, "LWRA", skipped_label_upper)
+    label_lwrb = _template_label_for_axis_step(template, "LWRB", skipped_label_upper)
+    label_lfin = _template_label_for_axis_step(template, "LFIN", skipped_label_upper)
+    label_rfrm = _template_label_for_axis_step(template, "RFRM", skipped_label_upper)
+    label_rwra = _template_label_for_axis_step(template, "RWRA", skipped_label_upper)
+    label_rwrb = _template_label_for_axis_step(template, "RWRB", skipped_label_upper)
+    label_rfin = _template_label_for_axis_step(template, "RFIN", skipped_label_upper)
     left_assignments = assign_arm_side(left4, label_lfrm, label_lwra, label_lwrb, label_lfin)
     right_assignments = assign_arm_side(right4, label_rfrm, label_rwra, label_rwrb, label_rfin)
-    if len(left_assignments) < 4 or len(right_assignments) < 4:
-        return pelvis_assignments + left_assignments + right_assignments
-
-    return pelvis_assignments + left_assignments + right_assignments
+    combined = pelvis_assignments + left_assignments + right_assignments
+    return combined, frozenset(top12)
 
 
 def assign_leg_foot12_after_pelvis_arm12(
@@ -644,6 +717,8 @@ def assign_leg_foot12_after_pelvis_arm12(
     exclude_pt_indices: set[int],
     clav_idx: int,
     template: dict,
+    *,
+    skipped_label_upper: frozenset[str] | None = None,
 ) -> list[tuple[int, str]]:
     """After pelvis/arm12: remaining points top 12 by Z. Split L/R by CLAV Y (left 6, right 6).
 
@@ -688,10 +763,15 @@ def assign_leg_foot12_after_pelvis_arm12(
         left6 = [top12[i] for i in range(12) if left_mask[i]]
         right6 = [top12[i] for i in range(12) if not left_mask[i]]
 
-    def _lab(name: str) -> str:
-        return next((lab for lab in template if str(lab).strip().upper() == name.upper()), name)
-
-    def assign_side_six(six_pts: list[int], label_thi: str, label_kne: str, label_tib: str, label_ank: str, label_hee: str, label_toe: str) -> list[tuple[int, str]]:
+    def assign_side_six(
+        six_pts: list[int],
+        label_thi: str | None,
+        label_kne: str | None,
+        label_tib: str | None,
+        label_ank: str | None,
+        label_hee: str | None,
+        label_toe: str | None,
+    ) -> list[tuple[int, str]]:
         if len(six_pts) < 6:
             logger.warning("LEG_FOOT12_SIDE_TOO_FEW: Left or right side has fewer than 6 points (got %d).", len(six_pts))
             return []
@@ -700,11 +780,11 @@ def assign_leg_foot12_after_pelvis_arm12(
             logger.warning("LEG_FOOT12_SIDE_Z_INVALID: Leg side has invalid Z; cannot assign THI, KNE, TIB, ANK in order.")
             return []
         order_z_side = np.argsort(-z_side)
-        out = [
-            (six_pts[order_z_side[0]], label_thi),
-            (six_pts[order_z_side[1]], label_kne),
-            (six_pts[order_z_side[2]], label_tib),
-        ]
+        labels_top3 = (label_thi, label_kne, label_tib)
+        out: list[tuple[int, str]] = []
+        for k in range(3):
+            if labels_top3[k] is not None:
+                out.append((six_pts[order_z_side[k]], labels_top3[k]))
         foot_three = [six_pts[order_z_side[3]], six_pts[order_z_side[4]], six_pts[order_z_side[5]]]
         pts3 = np.stack([points_frame[i] for i in foot_three], axis=0)
         if not np.isfinite(pts3).all():
@@ -723,21 +803,38 @@ def assign_leg_foot12_after_pelvis_arm12(
         ic = ({0, 1, 2} - {ia, ib}).pop()
         ank_idx = foot_three[ic]
         heel_toe = [foot_three[ia], foot_three[ib]]
-        out.append((ank_idx, label_ank))
+        if label_ank is not None:
+            out.append((ank_idx, label_ank))
         dot_back = np.array([float(points_frame[i, :2] @ d_back_xy) for i in heel_toe])
         if not np.all(np.isfinite(dot_back)) or dot_back[0] == dot_back[1]:
             logger.warning("LEG_FOOT12_FOOT_AP_INVALID: Foot side has invalid or identical A/P; cannot assign HEE/TOE.")
             return out
         order_ap = np.argsort(dot_back)
         # d_back_xy points posterior: smaller dot = anterior (TOE), larger = posterior (HEE)
-        out.append((heel_toe[order_ap[0]], label_toe))
-        out.append((heel_toe[order_ap[1]], label_hee))
+        if label_toe is not None:
+            out.append((heel_toe[order_ap[0]], label_toe))
+        if label_hee is not None:
+            out.append((heel_toe[order_ap[1]], label_hee))
         return out
 
-    left_out = assign_side_six(left6, _lab("LTHI"), _lab("LKNE"), _lab("LTIB"), _lab("LANK"), _lab("LHEE"), _lab("LTOE"))
-    right_out = assign_side_six(right6, _lab("RTHI"), _lab("RKNE"), _lab("RTIB"), _lab("RANK"), _lab("RHEE"), _lab("RTOE"))
-    if len(left_out) < 6 or len(right_out) < 6:
-        return left_out + right_out
+    left_out = assign_side_six(
+        left6,
+        _template_label_for_axis_step(template, "LTHI", skipped_label_upper),
+        _template_label_for_axis_step(template, "LKNE", skipped_label_upper),
+        _template_label_for_axis_step(template, "LTIB", skipped_label_upper),
+        _template_label_for_axis_step(template, "LANK", skipped_label_upper),
+        _template_label_for_axis_step(template, "LHEE", skipped_label_upper),
+        _template_label_for_axis_step(template, "LTOE", skipped_label_upper),
+    )
+    right_out = assign_side_six(
+        right6,
+        _template_label_for_axis_step(template, "RTHI", skipped_label_upper),
+        _template_label_for_axis_step(template, "RKNE", skipped_label_upper),
+        _template_label_for_axis_step(template, "RTIB", skipped_label_upper),
+        _template_label_for_axis_step(template, "RANK", skipped_label_upper),
+        _template_label_for_axis_step(template, "RHEE", skipped_label_upper),
+        _template_label_for_axis_step(template, "RTOE", skipped_label_upper),
+    )
     return left_out + right_out
 
 
@@ -1256,6 +1353,10 @@ def label_body_markers(
     d_back_xy: np.ndarray | None = None,
     d_right_xy: np.ndarray | None = None,
     column_fixed_labels: bool = False,
+    obstacle_points_dynamic: np.ndarray | None = None,
+    skipped_label_names: Sequence[str] | None = None,
+    assignment_trace: list[tuple[str, list[tuple[int, str]]]] | None = None,
+    trace_marker_names: Collection[str] | None = None,
 ) -> tuple[list[str], np.ndarray]:
     """
     Label body markers in dynamic trial using template and temporal propagation.
@@ -1285,6 +1386,17 @@ def label_body_markers(
     d_back_xy, d_right_xy : optional (2,) xy vectors from get_lr_ap_axes_from_walking. When both
         provided, head markers (LFHD, RFHD, LBHD, RBHD) are assigned at best frame by top 4 Z and
         L/R (d_right), A/P (d_back); remaining points/labels then use Z-band matching.
+    obstacle_points_dynamic : optional (n_frames, 2, 3) trajectories for OBSTACLE_L and OBSTACLE_R
+        in the same coordinate frame as ``points_dynamic`` (including any static/dynamic facing
+        rotation applied in the pipeline). At the labeling frame, body columns whose Y lies outside
+        [min(obstacle Y), max(obstacle Y)] are excluded from candidates. Omitted or non-finite
+        obstacles at that frame: no extra exclusion.
+    skipped_label_names : optional anatomical names (e.g. from ``skip_label_names`` in the pipeline)
+        to omit in axis-based steps (STRN/T10/arm, pelvis/arm12, leg/foot12); those points are
+        matched later via Z-band / Hungarian instead of using a fallback string.
+    assignment_trace : optional output list; when ``trace_marker_names`` is non-empty, appends
+        ``(stage_name, [(pi, label), ...])`` for those markers after key steps.
+    trace_marker_names : marker names to record in ``assignment_trace`` (case-insensitive).
 
     Returns
     -------
@@ -1293,6 +1405,29 @@ def label_body_markers(
     best_frame : int, 0-based frame index used for axis-based assignment
     """
     n_frames, n_points, _ = points_dynamic.shape
+    skipped_upper: frozenset[str] | None = None
+    if skipped_label_names:
+        skipped_upper = frozenset(
+            str(s).strip().upper() for s in skipped_label_names if str(s).strip()
+        )
+    trace_upper: frozenset[str] | None = None
+    if trace_marker_names:
+        if assignment_trace is None:
+            raise ValueError("assignment_trace must be a list when trace_marker_names is set.")
+        trace_upper = frozenset(
+            str(x).strip().upper() for x in trace_marker_names if str(x).strip()
+        )
+
+    def _trace_pairs(stage: str, pairs: list[tuple[int, str]]) -> None:
+        if trace_upper is None or assignment_trace is None:
+            return
+        hits = [(pi, lab) for pi, lab in pairs if str(lab).strip().upper() in trace_upper]
+        if hits:
+            assignment_trace.append((stage, hits))
+
+    def _trace_acc(stage: str, acc: list[tuple[int, str]]) -> None:
+        _trace_pairs(stage, acc)
+
     trunk_labels = _trunk_labels_in_template(template)
     if fixed_best_frame is not None:
         best_f = int(max(0, min(n_frames - 1, int(fixed_best_frame))))
@@ -1327,6 +1462,13 @@ def label_body_markers(
             middle_start=middle_start, middle_end=middle_end,
         )
 
+    obstacle_y_exclude: set[int] = set()
+    if obstacle_points_dynamic is not None and int(obstacle_points_dynamic.shape[0]) > best_f:
+        obstacle_y_exclude = _indices_outside_obstacle_y_span(
+            points_dynamic[best_f],
+            obstacle_points_dynamic[best_f],
+        )
+
     if label_to_band:
         point_bands = static_geometry.assign_point_bands_by_z_rank(
             points_dynamic[best_f],
@@ -1353,7 +1495,9 @@ def label_body_markers(
                 d_back_xy,
                 d_right_xy,
                 head_labels=head_labels_ordered if head_labels_ordered else None,
+                exclude_pt_indices=obstacle_y_exclude if obstacle_y_exclude else None,
             )
+            _trace_pairs("head", head_assignments)
             head_pt_set = {pi for pi, _ in head_assignments}
         # C7 and shoulders: among remaining points, top 1 Z = C7, next 2 Z = LSHO/RSHO (L/R by d_right)
         c7_shoulder_assignments: list[tuple[int, str]] = []
@@ -1368,9 +1512,10 @@ def label_body_markers(
             c7_shoulder_assignments = assign_c7_shoulders_after_head(
                 points_dynamic[best_f],
                 d_right_xy,
-                head_pt_set,
+                head_pt_set | obstacle_y_exclude,
                 template,
             )
+            _trace_pairs("c7_shoulder", c7_shoulder_assignments)
             priority_pt_set = head_pt_set | {pi for pi, _ in c7_shoulder_assignments}
         # CLAV and RBAK: top 2 Z in shoulder Y band; assign by A/P (centroid dot_back), then validate
         clav_rbak_assignments: list[tuple[int, str]] = []
@@ -1395,11 +1540,12 @@ def label_body_markers(
                     points_dynamic[best_f],
                     d_back_xy,
                     d_right_xy,
-                    priority_pt_set,
+                    priority_pt_set | obstacle_y_exclude,
                     lsho_idx,
                     rsho_idx,
                     template,
                 )
+                _trace_pairs("clav_rbak", clav_rbak_assignments)
                 priority_pt_set = priority_pt_set | {pi for pi, _ in clav_rbak_assignments}
         # STRN, T10, LUPA, RUPA, LELB, RELB: next 6 Z; Y in shoulder band → STRN/T10 (A/P); rest L/R by Y, then Z = UPA/ELB
         strn_t10_arm_assignments: list[tuple[int, str]] = []
@@ -1417,15 +1563,18 @@ def label_body_markers(
                 points_dynamic[best_f],
                 d_back_xy,
                 d_right_xy,
-                priority_pt_set,
+                priority_pt_set | obstacle_y_exclude,
                 lsho_idx,
                 rsho_idx,
                 template,
+                skipped_label_upper=skipped_upper,
             )
+            _trace_pairs("strn_t10_arm4", strn_t10_arm_assignments)
             if strn_t10_arm_assignments:
                 priority_pt_set = priority_pt_set | {pi for pi, _ in strn_t10_arm_assignments}
         # Pelvis (LASI,RASI,LPSI,RPSI) + arm/hand (LFRM,LWRA,LWRB,LFIN, RFRM,RWRA,RWRB,RFIN): next 12 Z; Y band -> pelvis A/P then L/R; rest left/right 4 each -> Z and A/P
         pelvis_arm12_assignments: list[tuple[int, str]] = []
+        pelvis_arm12_top12: frozenset[int] | None = None
         use_pelvis_arm12 = (
             use_strn_t10_arm
             and len(strn_t10_arm_assignments) >= 6
@@ -1436,15 +1585,17 @@ def label_body_markers(
             and any(str(lab).strip().upper() in PELVIS_ARM12_MARKERS_SET for lab in template)
         )
         if use_pelvis_arm12 and lsho_idx >= 0 and rsho_idx >= 0:
-            pelvis_arm12_assignments = assign_pelvis_arm12_after_strn_t10_arm(
+            pelvis_arm12_assignments, pelvis_arm12_top12 = assign_pelvis_arm12_after_strn_t10_arm(
                 points_dynamic[best_f],
                 d_back_xy,
                 d_right_xy,
-                priority_pt_set,
+                priority_pt_set | obstacle_y_exclude,
                 lsho_idx,
                 rsho_idx,
                 template,
+                skipped_label_upper=skipped_upper,
             )
+            _trace_pairs("pelvis_arm12", pelvis_arm12_assignments)
             if pelvis_arm12_assignments:
                 priority_pt_set = priority_pt_set | {pi for pi, _ in pelvis_arm12_assignments}
         # Leg/foot (12): remaining points top 12 by Z; split L/R by CLAV Y; per-side Z order THI,KNE,TIB,ANK; remaining 2 per side A/P on d_back (TOE=anterior, HEE=posterior)
@@ -1452,7 +1603,8 @@ def label_body_markers(
         clav_idx = next((pi for pi, lab in clav_rbak_assignments if str(lab).strip().upper() == "CLAV"), -1)
         use_leg_foot12 = (
             use_pelvis_arm12
-            and len(pelvis_arm12_assignments) >= 12
+            and pelvis_arm12_top12 is not None
+            and len(pelvis_arm12_top12) == 12
             and clav_idx >= 0
             and d_back_xy is not None
             and len(d_back_xy) == 2
@@ -1461,14 +1613,19 @@ def label_body_markers(
             and any(str(lab).strip().upper() in LEG_FOOT12_MARKERS_SET for lab in template)
         )
         if use_leg_foot12:
+            leg_foot_exclude = priority_pt_set | obstacle_y_exclude
+            if pelvis_arm12_top12 is not None:
+                leg_foot_exclude = leg_foot_exclude | set(pelvis_arm12_top12)
             leg_foot12_assignments = assign_leg_foot12_after_pelvis_arm12(
                 points_dynamic[best_f],
                 d_back_xy,
                 d_right_xy,
-                priority_pt_set,
+                leg_foot_exclude,
                 clav_idx,
                 template,
+                skipped_label_upper=skipped_upper,
             )
+            _trace_pairs("leg_foot12", leg_foot12_assignments)
             if leg_foot12_assignments:
                 priority_pt_set = priority_pt_set | {pi for pi, _ in leg_foot12_assignments}
         exclude_labels_z = HEAD_MARKERS_SET
@@ -1482,6 +1639,7 @@ def label_body_markers(
             exclude_labels_z = exclude_labels_z | PELVIS_ARM12_MARKERS_SET
         if leg_foot12_assignments:
             exclude_labels_z = exclude_labels_z | LEG_FOOT12_MARKERS_SET
+        _zband_ex = priority_pt_set | obstacle_y_exclude
         band_assignments = _match_within_z_bands(
             points_dynamic[best_f],
             template,
@@ -1489,16 +1647,21 @@ def label_body_markers(
             point_bands,
             use_hungarian=use_hungarian,
             max_match_distance=max_match_distance,
-            exclude_pt_indices=priority_pt_set if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments or pelvis_arm12_assignments or leg_foot12_assignments) else None,
+            exclude_pt_indices=_zband_ex if _zband_ex else None,
             exclude_labels=exclude_labels_z if (use_head_by_z or c7_shoulder_assignments or clav_rbak_assignments or strn_t10_arm_assignments or pelvis_arm12_assignments or leg_foot12_assignments) else None,
         )
+        _trace_pairs("z_bands_only", band_assignments)
         assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments + pelvis_arm12_assignments + leg_foot12_assignments + band_assignments
+        _trace_acc("cumulative_before_unassigned_pts", assignments)
         # Preserve axis/Z-based assignments so Procrustes+Hungarian do not overwrite head, C7, shoulders, CLAV, RBAK, STRN/T10/arm4, pelvis/arm12, leg/foot12
         axis_based_assignments = head_assignments + c7_shoulder_assignments + clav_rbak_assignments + strn_t10_arm_assignments + pelvis_arm12_assignments + leg_foot12_assignments
         # If template has more labels than label_to_band (e.g. 39 vs 27), match remaining points to arm/hand
         assigned_pts = {pi for pi, _ in assignments}
         assigned_labs = {str(lab).strip().upper() for _, lab in assignments}
-        unassigned_pts = [pi for pi in range(n_points) if pi not in assigned_pts]
+        unassigned_pts = [
+            pi for pi in range(n_points)
+            if pi not in assigned_pts and pi not in obstacle_y_exclude
+        ]
         unassigned_labels = [
             lab for lab in template
             if str(lab).strip().upper() not in assigned_labs
@@ -1514,15 +1677,21 @@ def label_body_markers(
             )
             for local_i, lab in asgn:
                 assignments.append((int(unassigned_pts[local_i]), lab))
+        _trace_acc("after_unassigned_pts_hungarian", assignments)
     else:
         axis_based_assignments = []
     if not label_to_band:
-        assignments = match_markers_to_template(
-            points_dynamic[best_f],
-            template,
-            use_hungarian=use_hungarian,
-            max_match_distance=max_match_distance,
-        )
+        _allowed = [i for i in range(n_points) if i not in obstacle_y_exclude]
+        if _allowed:
+            _raw = match_markers_to_template(
+                points_dynamic[best_f][_allowed],
+                template,
+                use_hungarian=use_hungarian,
+                max_match_distance=max_match_distance,
+            )
+            assignments = [(_allowed[r], lab) for r, lab in _raw]
+        else:
+            assignments = []
     # Align template using trunk-only Procrustes, then re-match — unless alignment quality is bad (fallback).
     # Do not overwrite axis/Z-based assignments (head, C7, shoulders, CLAV, RBAK) with Hungarian re-match.
     _TRUNK_RMS_MAX_MM = 150.0  # reject Procrustes if trunk RMS after align exceeds this
@@ -1538,7 +1707,10 @@ def label_body_markers(
             # Preserve head, C7, shoulders, CLAV, RBAK; re-match only remaining points to remaining labels
             axis_based_pt_set = {pi for pi, _ in axis_based_assignments}
             axis_based_lab_set = {str(lab).strip().upper() for _, lab in axis_based_assignments}
-            remaining_pts = [i for i in range(n_points) if i not in axis_based_pt_set]
+            remaining_pts = [
+                i for i in range(n_points)
+                if i not in axis_based_pt_set and i not in obstacle_y_exclude
+            ]
             remaining_labs = [
                 lab for lab in template
                 if str(lab).strip().upper() not in axis_based_lab_set
@@ -1563,19 +1735,27 @@ def label_body_markers(
             )
             if aligned_rms < _TRUNK_RMS_MAX_MM and aligned_rms < initial_rms:
                 assignments = assignments_new
+                _trace_acc("after_procrustes_rematch_took_aligned", assignments)
         else:
-            assignments_aligned = match_markers_to_template(
-                points_dynamic[best_f],
-                template_aligned,
-                use_hungarian=use_hungarian,
-                max_match_distance=max_match_distance,
-            )
+            _allow_pa = [i for i in range(n_points) if i not in obstacle_y_exclude]
+            if _allow_pa:
+                _raw_pa = match_markers_to_template(
+                    points_dynamic[best_f][_allow_pa],
+                    template_aligned,
+                    use_hungarian=use_hungarian,
+                    max_match_distance=max_match_distance,
+                )
+                assignments_aligned = [(_allow_pa[r], lab) for r, lab in _raw_pa]
+            else:
+                assignments_aligned = []
             aligned_rms = _trunk_rms(
                 points_dynamic[best_f], template_aligned, assignments_aligned, trunk_labels,
             )
             if aligned_rms < _TRUNK_RMS_MAX_MM and aligned_rms < initial_rms:
                 assignments = assignments_aligned
+                _trace_acc("after_procrustes_rematch_no_axis_branch", assignments)
         # else: keep original assignments (trunk matching failed or did not help)
+    _trace_acc("final_assignments", assignments)
     if not assignments:
         return [""] * n_points, np.empty((n_frames, n_points), dtype=object), best_f
     if column_fixed_labels:

@@ -184,6 +184,14 @@ def main() -> None:
         help="Do not require exactly 41 columns after screening (use for trials with different channel count).",
     )
     parser.add_argument(
+        "--skip-visibility-screening",
+        action="store_true",
+        help=(
+            "Skip Step 2: do not drop columns by per-column visibility fraction "
+            "(after Step 1 Y screening and optional frame trim)."
+        ),
+    )
+    parser.add_argument(
         "--first-frame",
         type=int,
         default=None,
@@ -374,7 +382,7 @@ def main() -> None:
             check_screened_count=not args.no_check_screened_count,
             trim_first_frame=args.first_frame,
             trim_last_frame=args.last_frame,
-            skip_visibility_screening=False,
+            skip_visibility_screening=args.skip_visibility_screening,
             y_outside_fraction_threshold=args.y_outside_fraction,
             min_finite_y_frames=args.min_finite_y_frames,
             unlabeled_numeric_base=args.unlabeled_label_base,

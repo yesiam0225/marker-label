@@ -606,12 +606,17 @@ def run_pipeline(
 
     # Align dynamic to static orientation when facing axes differ (e.g. static=y, dynamic=x)
     points_d_body_for_matching = points_d_body
+    points_obstacle_for_matching = points_obstacle
     if static_facing_axis and dynamic_facing_axis:
         R = rotation_for_facing_axes(static_facing_axis, dynamic_facing_axis)
         if R is not None:
             points_d_body_for_matching = points_d_body @ R.T  # (n_frames, n_pts, 3)
+            points_obstacle_for_matching = points_obstacle @ R.T
 
     # 3) Body labeling: head by top-4-Z + L/R/A/P at best frame; rest by no-arm-hand Z-band
+    skip_for_axis_labeling = (
+        [s.strip() for s in skip_label_names if s.strip()] if skip_label_names else None
+    )
     labels_body_out, label_per_frame, best_frame = label_body_markers(
         points_d_body_for_matching,
         template_39 if template_39 else template_body,
@@ -629,6 +634,8 @@ def run_pipeline(
         d_right_xy=d_right,
         fixed_best_frame=fixed_best_frame,
         column_fixed_labels=column_fixed_labels,
+        obstacle_points_dynamic=points_obstacle_for_matching,
+        skipped_label_names=skip_for_axis_labeling,
     )
 
     print(f"Best frame for labeling: {best_frame} (0-based index; 1-based frame = {best_frame + 1})")
