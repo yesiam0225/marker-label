@@ -143,6 +143,12 @@ PELVIS_ARM12_MARKERS_SET = frozenset(m.upper() for m in PELVIS_ARM12_MARKERS)
 # Error codes for pelvis/arm12 step (for logging / diagnostics)
 PELVIS_ARM12_TOO_FEW_POINTS = "PELVIS_ARM12_TOO_FEW_POINTS"
 PELVIS_BAND_NOT_4 = "PELVIS_BAND_NOT_4"
+# When more than 4 points fall in the shoulder Y-band among top-12 by Z, pick 4 by best
+# match to the static template pelvis inter-marker distance matrix (see body_labeling).
+PELVIS_GEOM_MAX_IN_BAND_CANDIDATES = 8
+PELVIS_GEOM_NO_TEMPLATE = "PELVIS_GEOM_NO_TEMPLATE"
+PELVIS_GEOM_NO_VALID_FOUR = "PELVIS_GEOM_NO_VALID_FOUR"
+PELVIS_BAND_RESOLVED_STATIC_GEOM = "PELVIS_BAND_RESOLVED_STATIC_GEOM"
 PELVIS_LEFT_NOT_4 = "PELVIS_LEFT_NOT_4"
 PELVIS_RIGHT_NOT_4 = "PELVIS_RIGHT_NOT_4"
 PELVIS_ARM_DUPLICATE_INDEX = "PELVIS_ARM_DUPLICATE_INDEX"

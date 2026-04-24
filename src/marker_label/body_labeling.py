@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 from collections.abc import Collection, Sequence
 
@@ -21,6 +22,10 @@ from .constants import (
     STRN_T10_ARM_MARKERS_SET,
     PELVIS_ARM12_MARKERS_SET,
     LEG_FOOT12_MARKERS_SET,
+    PELVIS_BAND_RESOLVED_STATIC_GEOM,
+    PELVIS_GEOM_MAX_IN_BAND_CANDIDATES,
+    PELVIS_GEOM_NO_TEMPLATE,
+    PELVIS_GEOM_NO_VALID_FOUR,
     TRUNK_LABELS,
 )
 from .constants import (
@@ -92,6 +97,82 @@ class C7ShoulderValidationError(Exception):
 def _trunk_labels_in_template(template: dict) -> list[str]:
     """Return template keys whose label (case-insensitive) is in TRUNK_LABELS."""
     return [k for k in template if str(k).strip().upper() in _TRUNK_SET]
+
+
+_PELVIS_FOUR = ("LASI", "RASI", "LPSI", "RPSI")
+
+
+def _template_position3_for_name(template: dict, canonical: str) -> np.ndarray | None:
+    """Return (3,) template mean position for a marker name, or None if missing / non-finite."""
+    c = canonical.strip().upper()
+    for k, v in template.items():
+        if str(k).strip().upper() == c:
+            a = np.asarray(v, dtype=np.float64).ravel()[:3]
+            if a.size == 3 and bool(np.isfinite(a).all()):
+                return a
+    return None
+
+
+def _static_pelvis_template_distance_matrix(
+    template: dict,
+    skipped_label_upper: frozenset[str] | None,
+) -> np.ndarray | None:
+    """
+    4x4 inter-point distances (mm) for static LASI, RASI, LPSI, RPSI template order.
+    Returns None if any pelvis label is skipped for axis labeling or not in the template.
+    """
+    for name in _PELVIS_FOUR:
+        if skipped_label_upper is not None and name in skipped_label_upper:
+            return None
+        if _template_label_for_axis_step(template, name, skipped_label_upper) is None:
+            return None
+    rows = []
+    for name in _PELVIS_FOUR:
+        p = _template_position3_for_name(template, name)
+        if p is None:
+            return None
+        rows.append(p)
+    t = np.stack(rows, axis=0)
+    return np.linalg.norm(t[:, None, :] - t[None, :, :], axis=-1)
+
+
+def _select_four_pelvis_indices_by_static_geometry(
+    points_frame: np.ndarray,
+    candidate_indices: list[int] | list,
+    d_ref: np.ndarray,
+) -> tuple[list[int] | None, float | None]:
+    """
+    From ``candidate_indices`` (length >= 4), choose 4 body indices that minimize
+    RMSE between the 4x4 inter-point distance matrix and ``d_ref`` (static template),
+    minimizing over all 4-subsets and all 24 permutations (row orderings) of each subset.
+    """
+    cands = [int(i) for i in candidate_indices]
+    n = len(cands)
+    if n < 4:
+        return None, None
+    if n == 4:
+        p4 = points_frame[cands, :]
+        if not bool(np.isfinite(p4).all()):
+            return None, None
+        d_dyn = np.linalg.norm(p4[:, None, :] - p4[None, :, :], axis=-1)
+        rms = float(np.sqrt(np.mean((d_ref - d_dyn) ** 2)))
+        return cands, rms
+    best_subset: list[int] | None = None
+    best_rms = float("inf")
+    for subset in itertools.combinations(cands, 4):
+        p4 = points_frame[np.array(subset, dtype=np.int64), :]
+        if not bool(np.isfinite(p4).all()):
+            continue
+        for perm in itertools.permutations((0, 1, 2, 3), 4):
+            o = p4[np.array(perm, dtype=np.int64), :]
+            d_dyn = np.linalg.norm(o[:, None, :] - o[None, :, :], axis=-1)
+            rms = float(np.sqrt(np.mean((d_ref - d_dyn) ** 2)))
+            if rms < best_rms:
+                best_rms = rms
+                best_subset = list(subset)
+    if best_subset is None:
+        return None, None
+    return best_subset, best_rms
 
 
 def _indices_outside_fixed_y_band(
@@ -589,6 +670,8 @@ def assign_pelvis_arm12_after_strn_t10_arm(
     """
     After STRN/T10/arm4: from remaining points take the 12 highest Z.
     - 4 points with Y between LSHO and RSHO -> pelvis: A/P sort -> anterior 2 = LASI,RASI (L/R by Y), posterior 2 = LPSI,RPSI (L/R by Y).
+      If more than 4 points fall in that Y-band, 4 are chosen by best match to the static template
+      inter-marker distance matrix (LASI/RASI/LPSI/RPSI), if those template positions exist and are not skip-labeled.
     - Remaining 8: left 4 (Y on left side of LSHO), right 4 (Y on right side of RSHO).
     - Left 4: Z max=LFRM, Z min=LFIN; middle 2 by A/P -> LWRA (anterior), LWRB (posterior).
     - Right 4: Z max=RFRM, Z min=RFIN; middle 2 by A/P -> RWRA, RWRB.
@@ -628,12 +711,58 @@ def assign_pelvis_arm12_after_strn_t10_arm(
     top12 = [remaining[int(k)] for k in order_z]
 
     in_band = [i for i in top12 if y_min <= points_frame[i, 1] <= y_max]
-    if len(in_band) != 4:
+    n_shoulder = len(in_band)
+    if n_shoulder < 4:
         logger.warning(
             "PELVIS_BAND_NOT_4: Expected 4 pelvis candidates in shoulder Y-band, got %d (y in [%.1f, %.1f]).",
-            len(in_band), y_min, y_max,
+            n_shoulder, y_min, y_max,
         )
         return [], None
+    if n_shoulder > 4:
+        d_ref = _static_pelvis_template_distance_matrix(template, skipped_label_upper)
+        if d_ref is None:
+            logger.warning(
+                "%s: Cannot build static pelvis distance matrix (missing or skip-label LASI,RASI,LPSI,RPSI); "
+                "will not disambiguate %d shoulder-band candidates.",
+                PELVIS_GEOM_NO_TEMPLATE,
+                n_shoulder,
+            )
+            logger.warning(
+                "PELVIS_BAND_NOT_4: Expected 4 pelvis candidates in shoulder Y-band, got %d (y in [%.1f, %.1f]).",
+                n_shoulder, y_min, y_max,
+            )
+            return [], None
+        cands: list[int] = list(in_band)
+        if len(cands) > PELVIS_GEOM_MAX_IN_BAND_CANDIDATES:
+            cands.sort(key=lambda i: float(points_frame[i, 2]), reverse=True)
+            cands = cands[: int(PELVIS_GEOM_MAX_IN_BAND_CANDIDATES)]
+            logger.info(
+                "Pelvis: %d shoulder Y-band candidates capped to %d (highest Z) for static-geometry selection.",
+                n_shoulder,
+                PELVIS_GEOM_MAX_IN_BAND_CANDIDATES,
+            )
+        picked, rms = _select_four_pelvis_indices_by_static_geometry(points_frame, cands, d_ref)
+        if picked is None:
+            logger.warning(
+                "%s: No 4-point subset of candidates matched static pelvis geometry.",
+                PELVIS_GEOM_NO_VALID_FOUR,
+            )
+            logger.warning(
+                "PELVIS_BAND_NOT_4: Expected 4 pelvis candidates in shoulder Y-band, got %d (y in [%.1f, %.1f]).",
+                n_shoulder, y_min, y_max,
+            )
+            return [], None
+        in_band = picked
+        if rms is not None:
+            logger.info(
+                "%s: Chose 4 of %d shoulder Y-band point(s) by static inter-marker distance RMSE=%.2f mm "
+                "(y in [%.1f, %.1f]).",
+                PELVIS_BAND_RESOLVED_STATIC_GEOM,
+                n_shoulder,
+                rms,
+                y_min,
+                y_max,
+            )
 
     dot_back = np.array([float(points_frame[i, :2] @ d_back_xy) for i in in_band])
     order_ap = np.argsort(dot_back)
