@@ -76,6 +76,27 @@ DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM = 400.0
 DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES = 12
 # Minimum simultaneous finite-XYZ frames for a pair when computing mean positions for rod geometry.
 DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES = 50
+# Balanced rod-pair geometry gate (assumes obstacle rod is roughly along lab Y).
+# Endpoints should stay close in X/Z while separated in Y.
+# Set <= 0 to disable dx hard gate (use score term only).
+DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM = 0.0
+# Set <= 0 to disable dz hard gate (use score term only).
+DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM = 0.0
+# Optional length tolerance around ``obstacle_rod_length_target_mm`` when target is provided.
+DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM = 30.0
+DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION = 0.06
+# Additional robust motion gate for rod candidates: 90th percentile inter-frame displacement.
+DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM = 24.0
+# Balanced rod-pair weighted score coefficients (lower is better).
+DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X = 1.0
+DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH = 0.9
+DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z = 0.15
+DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION = 0.2
+# Obstacle candidate Y band (lab mm, axis Y): only columns whose median Y lies in this interval
+# are considered. Prevents false rod pairs on markers far from the subject path (e.g. other lab objects).
+# Set both min and max to None in the pipeline to disable.
+DEFAULT_OBSTACLE_CANDIDATE_Y_MIN_MM = -500.0
+DEFAULT_OBSTACLE_CANDIDATE_Y_MAX_MM = 1500.0
 
 # After obstacle detection: drop non-obstacle screened columns with mean inter-frame speed
 # below this (mm/frame) and visibility >= obstacle threshold. Omit run_pipeline argument or pass

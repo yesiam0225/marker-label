@@ -7,10 +7,21 @@ import sys
 
 from .constants import (
     DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM,
+    DEFAULT_OBSTACLE_CANDIDATE_Y_MAX_MM,
+    DEFAULT_OBSTACLE_CANDIDATE_Y_MIN_MM,
     DEFAULT_OBSTACLE_MAX_MOTION_MM,
     DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION,
+    DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM,
     DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
     DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z,
     DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
     DEFAULT_OBSTACLE_VISIBILITY_FLOOR,
 )
@@ -118,6 +129,116 @@ def main() -> None:
         help=(
             "Rod mode: minimum simultaneous finite-XYZ frames for pair geometry "
             f"(default {DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES})."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-dx-max-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Rod mode: pair gate for |dx| between endpoints in mm (for y-axis rod; "
+            f"default {DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM}, <=0 disables)."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-dz-max-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Rod mode: pair gate for |dz| between endpoints in mm (for y-axis rod; "
+            f"default {DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM}, <=0 disables)."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-length-tol-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Rod mode: absolute tolerance for |axial-target| when --obstacle-rod-length-target-mm is set "
+            f"(default {DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM})."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-length-tol-frac",
+        type=float,
+        default=None,
+        metavar="F",
+        help=(
+            "Rod mode: relative tolerance fraction for |axial-target| when target is set "
+            f"(default {DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION})."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-p90-motion-max-mm",
+        type=float,
+        default=None,
+        metavar="MM",
+        help=(
+            "Rod mode: per-column p90 inter-frame displacement cap in mm/frame "
+            f"(default {DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM}; <=0 disables)."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-rod-score-weight-x",
+        type=float,
+        default=None,
+        metavar="W",
+        help=f"Rod mode score weight for |dx| term (default {DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X}).",
+    )
+    parser.add_argument(
+        "--obstacle-rod-score-weight-length",
+        type=float,
+        default=None,
+        metavar="W",
+        help=f"Rod mode score weight for length mismatch term (default {DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH}).",
+    )
+    parser.add_argument(
+        "--obstacle-rod-score-weight-z",
+        type=float,
+        default=None,
+        metavar="W",
+        help=f"Rod mode score weight for |dz| term (default {DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z}).",
+    )
+    parser.add_argument(
+        "--obstacle-rod-score-weight-motion",
+        type=float,
+        default=None,
+        metavar="W",
+        help=f"Rod mode score weight for motion tie term (default {DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION}).",
+    )
+    parser.add_argument(
+        "--obstacle-candidate-y-min-mm",
+        type=float,
+        default=DEFAULT_OBSTACLE_CANDIDATE_Y_MIN_MM,
+        metavar="MM",
+        help=(
+            "Obstacle columns only if median lab Y (mm) is in [min, max] (default: "
+            f"{DEFAULT_OBSTACLE_CANDIDATE_Y_MIN_MM}..{DEFAULT_OBSTACLE_CANDIDATE_Y_MAX_MM})."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-candidate-y-max-mm",
+        type=float,
+        default=DEFAULT_OBSTACLE_CANDIDATE_Y_MAX_MM,
+        metavar="MM",
+        help="Upper bound of median Y (mm) for obstacle candidates; see --obstacle-candidate-y-min-mm.",
+    )
+    parser.add_argument(
+        "--obstacle-no-candidate-y-range",
+        action="store_true",
+        help="Allow obstacle selection without filtering by median lab Y (disables the default band).",
+    )
+    parser.add_argument(
+        "--obstacle-force-columns",
+        type=str,
+        default=None,
+        metavar="I,J",
+        help=(
+            "Two loaded 0-based dynamic column indices (comma-separated) to use as obstacles; "
+            "skips automatic detection. After --drop-loaded-columns, use indices in that file."
         ),
     )
     parser.add_argument(
@@ -373,6 +494,72 @@ def main() -> None:
             if args.obstacle_rod_min_overlap_frames is not None
             else DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES
         )
+        _c_y_min: float | None
+        _c_y_max: float | None
+        if args.obstacle_no_candidate_y_range:
+            _c_y_min, _c_y_max = None, None
+        else:
+            _c_y_min, _c_y_max = (
+                float(args.obstacle_candidate_y_min_mm),
+                float(args.obstacle_candidate_y_max_mm),
+            )
+        _rdx = (
+            args.obstacle_rod_dx_max_mm
+            if args.obstacle_rod_dx_max_mm is not None
+            else DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM
+        )
+        _rdz = (
+            args.obstacle_rod_dz_max_mm
+            if args.obstacle_rod_dz_max_mm is not None
+            else DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM
+        )
+        _rtol_mm = (
+            args.obstacle_rod_length_tol_mm
+            if args.obstacle_rod_length_tol_mm is not None
+            else DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM
+        )
+        _rtol_frac = (
+            args.obstacle_rod_length_tol_frac
+            if args.obstacle_rod_length_tol_frac is not None
+            else DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION
+        )
+        _rp90 = (
+            args.obstacle_rod_p90_motion_max_mm
+            if args.obstacle_rod_p90_motion_max_mm is not None
+            else DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM
+        )
+        _w_x = (
+            args.obstacle_rod_score_weight_x
+            if args.obstacle_rod_score_weight_x is not None
+            else DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X
+        )
+        _w_l = (
+            args.obstacle_rod_score_weight_length
+            if args.obstacle_rod_score_weight_length is not None
+            else DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH
+        )
+        _w_z = (
+            args.obstacle_rod_score_weight_z
+            if args.obstacle_rod_score_weight_z is not None
+            else DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z
+        )
+        _w_m = (
+            args.obstacle_rod_score_weight_motion
+            if args.obstacle_rod_score_weight_motion is not None
+            else DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION
+        )
+        _obstacle_force: tuple[int, int] | None
+        if args.obstacle_force_columns:
+            _parts = [p.strip() for p in str(args.obstacle_force_columns).split(",") if p.strip()]
+            if len(_parts) != 2:
+                print(
+                    "Error: --obstacle-force-columns requires exactly two comma-separated indices (e.g. 0,25).",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+            _obstacle_force = (int(_parts[0]), int(_parts[1]))
+        else:
+            _obstacle_force = None
         info = run_pipeline(
             args.static,
             args.dynamic,
@@ -386,6 +573,17 @@ def main() -> None:
             obstacle_rod_length_target_mm=args.obstacle_rod_length_target_mm,
             obstacle_rod_max_pair_candidates=_rk,
             obstacle_rod_min_overlap_frames=_rov,
+            obstacle_rod_pair_dx_max_mm=_rdx,
+            obstacle_rod_pair_dz_max_mm=_rdz,
+            obstacle_rod_pair_length_tol_mm=_rtol_mm,
+            obstacle_rod_pair_length_tol_fraction=_rtol_frac,
+            obstacle_rod_pair_p90_motion_max_mm=_rp90,
+            obstacle_rod_score_weight_x=_w_x,
+            obstacle_rod_score_weight_length=_w_l,
+            obstacle_rod_score_weight_z=_w_z,
+            obstacle_rod_score_weight_motion=_w_m,
+            obstacle_candidate_y_min_mm=_c_y_min,
+            obstacle_candidate_y_max_mm=_c_y_max,
             static_facing_axis=args.static_facing,
             dynamic_facing_axis=args.dynamic_facing,
             static_scale=static_scale,
@@ -411,6 +609,7 @@ def main() -> None:
             auto_drop_missing_fraction_ge=args.auto_drop_missing_fraction,
             column_fixed_labels=args.column_fixed_labels,
             drop_extra_stationary_motion_max_mm=drop_extra_stationary_mm,
+            obstacle_force_loaded_column_indices=_obstacle_force,
         )
         print(f"Labeled {info['n_markers']} markers, {info['n_frames']} frames.")
         if "best_frame_1based" in info:

@@ -14,8 +14,19 @@ from .constants import (
     DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM,
     DEFAULT_OBSTACLE_MAX_MOTION_MM,
     DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION,
+    DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM,
+    DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM,
     DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
+    DEFAULT_OBSTACLE_CANDIDATE_Y_MAX_MM,
+    DEFAULT_OBSTACLE_CANDIDATE_Y_MIN_MM,
     DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X,
+    DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z,
     DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
     DEFAULT_OBSTACLE_VISIBILITY_FLOOR,
     MIN_BODY_MARKER_COLUMNS,
@@ -35,6 +46,8 @@ from .errors import (
     ERR_DROP_COLUMN_REMOVE_ALL,
     ERR_EXTRA_STATIONARY_INVALID,
     ERR_EXTRA_STATIONARY_REMOVE_ALL,
+    ERR_OBSTACLE_FORCED_INVALID,
+    ERR_OBSTACLE_FORCED_NOT_FOUND,
     ERR_OBSTACLE_MODE,
     ERR_SCREENED_COLUMNS_LT_MIN,
     ERR_SKIP_LABEL_EMPTY_TEMPLATE,
@@ -52,6 +65,7 @@ from .screening import (
 from .obstacle import (
     detect_obstacle_markers,
     detect_obstacle_markers_rod_pair,
+    order_obstacle_l_r_for_screened_pair,
     remap_indices_after_screened_drops,
     screened_indices_extra_stationary_to_drop,
     trial_obstacle_y_band,
@@ -247,6 +261,17 @@ def run_pipeline(
     obstacle_rod_length_target_mm: float | None = None,
     obstacle_rod_max_pair_candidates: int = DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
     obstacle_rod_min_overlap_frames: int = DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
+    obstacle_rod_pair_dx_max_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM,
+    obstacle_rod_pair_dz_max_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM,
+    obstacle_rod_pair_length_tol_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM,
+    obstacle_rod_pair_length_tol_fraction: float = DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION,
+    obstacle_rod_pair_p90_motion_max_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM,
+    obstacle_rod_score_weight_x: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X,
+    obstacle_rod_score_weight_length: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH,
+    obstacle_rod_score_weight_z: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z,
+    obstacle_rod_score_weight_motion: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION,
+    obstacle_candidate_y_min_mm: float | None = DEFAULT_OBSTACLE_CANDIDATE_Y_MIN_MM,
+    obstacle_candidate_y_max_mm: float | None = DEFAULT_OBSTACLE_CANDIDATE_Y_MAX_MM,
     use_pelvis_frame: bool = False,
     static_facing_axis: str | None = None,
     dynamic_facing_axis: str | None = None,
@@ -275,6 +300,7 @@ def run_pipeline(
     auto_drop_missing_fraction_ge: float | None = None,
     column_fixed_labels: bool = False,
     drop_extra_stationary_motion_max_mm: float | None = None,
+    obstacle_force_loaded_column_indices: tuple[int, int] | list[int] | None = None,
 ) -> dict:
     """
     Run the full labeling pipeline.
@@ -302,6 +328,18 @@ def run_pipeline(
     obstacle_rod_max_pair_candidates : only the lowest-median-motion K columns enter pairwise search.
     obstacle_rod_min_overlap_frames : minimum simultaneous finite-XYZ frames for a pair when
         computing mean positions for rod geometry.
+    obstacle_rod_pair_dx_max_mm, obstacle_rod_pair_dz_max_mm : hard pairwise mismatch gates in mm
+        for ``rod_pair`` mode when ``obstacle_rod_separation_axis='y'``.
+    obstacle_rod_pair_length_tol_mm, obstacle_rod_pair_length_tol_fraction : when
+        ``obstacle_rod_length_target_mm`` is set, require ``|axial-target|`` <=
+        ``max(length_tol_mm, length_tol_fraction*target)``.
+    obstacle_rod_pair_p90_motion_max_mm : ``rod_pair`` candidate filter on per-column p90 inter-frame
+        displacement; <= 0 disables.
+    obstacle_rod_score_weight_x, obstacle_rod_score_weight_length, obstacle_rod_score_weight_z,
+    obstacle_rod_score_weight_motion : weighted-score coefficients in ``rod_pair`` pair selection.
+    obstacle_candidate_y_min_mm, obstacle_candidate_y_max_mm : if either is not ``None``, only
+        markers with **median lab Y** in ``[y_min, y_max]`` (inclusive) are obstacle candidates
+        (default ``-500`` to ``1500`` mm). Pass both ``None`` to disable (no Y restriction).
     use_pelvis_frame : build template in pelvis frame (default False = lab frame)
     static_facing_axis : lab axis subject faces in static: 'x', '-x', 'y', '-y' (optional)
     dynamic_facing_axis : lab axis subject faces in dynamic (optional). If both set and
@@ -348,6 +386,10 @@ def run_pipeline(
         record the reason out of band. Requires at least two obstacle markers detected.
         Motion is computed over the **full** trajectory (same as obstacle motion scores); it does
         not depend on ``fixed_best_frame`` or ``middle_start`` / ``middle_end``.
+    obstacle_force_loaded_column_indices : if set, two **loaded** 0-based dynamic column indices
+        (same convention as ``drop_loaded_column_indices`` after any manual column drop) that are
+        the obstacle pair. Skips automatic obstacle detection; L/R is assigned from lab Y. Raises
+        if either column is not in the screened set.
 
     Returns
     -------
@@ -423,7 +465,51 @@ def run_pipeline(
 
     # Step 4: Obstacle detection on screened dynamic; L/R by y-axis (walking along x)
     _mode = str(obstacle_detection_mode).strip().lower()
-    if _mode == "rod_pair":
+    _obstacle_forced: tuple[int, int] | None = None
+    if obstacle_force_loaded_column_indices is not None:
+        try:
+            a, b = (
+                int(obstacle_force_loaded_column_indices[0]),
+                int(obstacle_force_loaded_column_indices[1]),
+            )
+        except (TypeError, ValueError, IndexError) as e:
+            raise LabelingPipelineError(
+                ERR_OBSTACLE_FORCED_INVALID,
+                f"obstacle_force_loaded_column_indices must be a pair of ints, got {obstacle_force_loaded_column_indices!r}.",
+                step="obstacle",
+            ) from e
+        if a == b:
+            raise LabelingPipelineError(
+                ERR_OBSTACLE_FORCED_INVALID,
+                "obstacle_force_loaded_column_indices must be two different columns.",
+                step="obstacle",
+            )
+        _obstacle_forced = (a, b)
+        loaded_to_screen: dict[int, int] = {}
+        for j in range(n_screened):
+            li = int(screening_keep_for_loaded[j])
+            if li == a:
+                loaded_to_screen[a] = j
+            if li == b:
+                loaded_to_screen[b] = j
+        miss = [x for x in (a, b) if x not in loaded_to_screen]
+        if miss:
+            raise LabelingPipelineError(
+                ERR_OBSTACLE_FORCED_NOT_FOUND,
+                f"forced obstacle column(s) not in screened set (dropped by screening or out of range): {miss}.",
+                step="obstacle",
+            )
+        try:
+            obstacle_indices, obstacle_labels = order_obstacle_l_r_for_screened_pair(
+                points_d, loaded_to_screen[a], loaded_to_screen[b], lr_axis="y"
+            )
+        except ValueError as e:
+            raise LabelingPipelineError(
+                ERR_OBSTACLE_FORCED_INVALID,
+                str(e),
+                step="obstacle",
+            ) from e
+    elif _mode == "rod_pair":
         obstacle_indices, obstacle_labels = detect_obstacle_markers_rod_pair(
             points_d,
             visibility_min=obstacle_visibility_min,
@@ -434,7 +520,18 @@ def run_pipeline(
             rod_length_target_mm=obstacle_rod_length_target_mm,
             rod_max_pair_candidates=obstacle_rod_max_pair_candidates,
             rod_min_overlap_frames=obstacle_rod_min_overlap_frames,
+            rod_pair_dx_max_mm=obstacle_rod_pair_dx_max_mm,
+            rod_pair_dz_max_mm=obstacle_rod_pair_dz_max_mm,
+            rod_pair_length_tol_mm=obstacle_rod_pair_length_tol_mm,
+            rod_pair_length_tol_fraction=obstacle_rod_pair_length_tol_fraction,
+            rod_pair_p90_motion_max_mm=obstacle_rod_pair_p90_motion_max_mm,
+            rod_score_weight_x=obstacle_rod_score_weight_x,
+            rod_score_weight_length=obstacle_rod_score_weight_length,
+            rod_score_weight_z=obstacle_rod_score_weight_z,
+            rod_score_weight_motion=obstacle_rod_score_weight_motion,
             lr_axis="y",
+            candidate_y_min_mm=obstacle_candidate_y_min_mm,
+            candidate_y_max_mm=obstacle_candidate_y_max_mm,
         )
     elif _mode == "legacy":
         obstacle_indices, obstacle_labels = detect_obstacle_markers(
@@ -442,6 +539,8 @@ def run_pipeline(
             visibility_min=obstacle_visibility_min,
             lr_axis="y",
             motion_max_mm=obstacle_max_motion_mm,
+            candidate_y_min_mm=obstacle_candidate_y_min_mm,
+            candidate_y_max_mm=obstacle_candidate_y_max_mm,
         )
     else:
         raise LabelingPipelineError(
@@ -466,15 +565,47 @@ def run_pipeline(
             )
         )
         if _mode == "rod_pair":
+            if (obstacle_candidate_y_min_mm is not None) or (
+                obstacle_candidate_y_max_mm is not None
+            ):
+                _lo = (
+                    f"{obstacle_candidate_y_min_mm:g}"
+                    if obstacle_candidate_y_min_mm is not None
+                    else "-inf"
+                )
+                _hi = (
+                    f"{obstacle_candidate_y_max_mm:g}"
+                    if obstacle_candidate_y_max_mm is not None
+                    else "inf"
+                )
+                _y_band = f" median Y in [{_lo}, {_hi}] mm,"
+            else:
+                _y_band = ""
             detail = (
                 f"rod_pair: need 2 candidates (visibility floor {obstacle_visibility_floor:.0%}, "
-                f"min visibility {obstacle_visibility_min:.0%}, {_cap_note}) "
+                f"min visibility {obstacle_visibility_min:.0%},{_y_band} {_cap_note}) "
                 f"and a pair with axial separation ≥ {obstacle_rod_length_min_mm:g} mm "
                 f"on axis {obstacle_rod_separation_axis!r}."
             )
         else:
+            if (obstacle_candidate_y_min_mm is not None) or (
+                obstacle_candidate_y_max_mm is not None
+            ):
+                _lo = (
+                    f"{obstacle_candidate_y_min_mm:g}"
+                    if obstacle_candidate_y_min_mm is not None
+                    else "-inf"
+                )
+                _hi = (
+                    f"{obstacle_candidate_y_max_mm:g}"
+                    if obstacle_candidate_y_max_mm is not None
+                    else "inf"
+                )
+                _y_leg = f" median Y in [{_lo}, {_hi}] mm, "
+            else:
+                _y_leg = ""
             detail = (
-                f"visibility >= {obstacle_visibility_min:.0%}, {_cap_note}, then lowest motion."
+                f"visibility >= {obstacle_visibility_min:.0%}, {_y_leg}{_cap_note}, then lowest motion."
             )
         raise ScreeningError(
             4,
@@ -741,4 +872,5 @@ def run_pipeline(
         "auto_dropped_loaded_column_indices": auto_dropped_loaded_indices,
         "dropped_extra_stationary_loaded_indices": dropped_extra_stationary_loaded,
         "obstacle_detection_mode": _mode,
+        "obstacle_force_loaded_column_indices": _obstacle_forced,
     }
