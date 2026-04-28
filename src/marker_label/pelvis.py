@@ -118,6 +118,51 @@ def points_to_pelvis_frame(
     return out.reshape(shape)
 
 
+def rigid_pelvis_from_template_to_observed(
+    observed_four: np.ndarray,
+    template_four: np.ndarray,
+) -> np.ndarray:
+    """
+    Place the static **pelvis quadrilateral** (LASI, RASI, LPSI, RPSI, same point order) in the
+    lab by a rigid transform that best matches the four *observed* points (least squares).
+
+    Inter-marker distances in the result **equal** the template (up to float error); only overall
+    position/orientation is chosen to match ``observed_four``. This does not fix a wrong
+    point-to-label assignment: it repositions the static shape as a block.
+
+    Parameters
+    ----------
+    observed_four
+        (4, 3) current lab points in marker order (LASI, RASI, LPSI, RPSI).
+    template_four
+        (4, 3) static mean positions, same order.
+
+    Returns
+    -------
+    (4, 3) lab coordinates; NaN if any input is non-finite.
+    """
+    o = np.asarray(observed_four, dtype=np.float64)
+    t = np.asarray(template_four, dtype=np.float64)
+    if o.shape != (4, 3) or t.shape != (4, 3) or (not bool(np.isfinite(o).all())) or (not bool(np.isfinite(t).all())):
+        return np.full((4, 3), np.nan, dtype=np.float64)
+    a = o.T
+    b = t.T
+    a_mean = a.mean(axis=1, keepdims=True)
+    b_mean = b.mean(axis=1, keepdims=True)
+    ac = a - a_mean
+    bc = b - b_mean
+    h = ac @ bc.T
+    u, _, vh = np.linalg.svd(h, full_matrices=True)
+    r = u @ vh
+    if float(np.linalg.det(r)) < 0:
+        s_fix = np.eye(3, dtype=np.float64)
+        s_fix[2, 2] = -1.0
+        r = u @ s_fix @ vh
+    tvec = a_mean - r @ b_mean
+    fitted = r @ b + tvec
+    return np.ascontiguousarray(fitted.T)
+
+
 def pelvis_frame_per_frame(
     points: np.ndarray,
     labels: list[str],
