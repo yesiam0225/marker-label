@@ -16,6 +16,8 @@ from .constants import (
     DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM,
     DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM,
     DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM,
+    DEFAULT_OBSTACLE_MANUAL_BEST_FRAME_WINDOW_OFFSETS,
+    DEFAULT_OBSTACLE_MANUAL_BEST_FRAME_WINDOW_LENGTH,
     DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION,
     DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM,
     DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM,
@@ -65,6 +67,7 @@ from .screening import (
 from .obstacle import (
     detect_obstacle_markers,
     detect_obstacle_markers_rod_pair,
+    detect_obstacle_markers_rod_pair_near_frame,
     order_obstacle_l_r_for_screened_pair,
     remap_indices_after_screened_drops,
     screened_indices_extra_stationary_to_drop,
@@ -270,6 +273,8 @@ def run_pipeline(
     obstacle_rod_score_weight_length: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH,
     obstacle_rod_score_weight_z: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z,
     obstacle_rod_score_weight_motion: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION,
+    obstacle_manual_best_frame_window_offsets: Sequence[int] = DEFAULT_OBSTACLE_MANUAL_BEST_FRAME_WINDOW_OFFSETS,
+    obstacle_manual_best_frame_window_length: int = DEFAULT_OBSTACLE_MANUAL_BEST_FRAME_WINDOW_LENGTH,
     obstacle_candidate_y_min_mm: float | None = DEFAULT_OBSTACLE_CANDIDATE_Y_MIN_MM,
     obstacle_candidate_y_max_mm: float | None = DEFAULT_OBSTACLE_CANDIDATE_Y_MAX_MM,
     use_pelvis_frame: bool = False,
@@ -337,6 +342,10 @@ def run_pipeline(
         displacement; <= 0 disables.
     obstacle_rod_score_weight_x, obstacle_rod_score_weight_length, obstacle_rod_score_weight_z,
     obstacle_rod_score_weight_motion : weighted-score coefficients in ``rod_pair`` pair selection.
+    obstacle_manual_best_frame_window_offsets, obstacle_manual_best_frame_window_length :
+        when ``fixed_best_frame`` is set and mode is ``rod_pair``, detect obstacle pairs on
+        local windows around that frame and select by majority vote (center window tiebreak).
+        If no local pair is found, fallback to full-trial rod_pair detection.
     obstacle_candidate_y_min_mm, obstacle_candidate_y_max_mm : if either is not ``None``, only
         markers with **median lab Y** in ``[y_min, y_max]`` (inclusive) are obstacle candidates
         (default ``-500`` to ``1500`` mm). Pass both ``None`` to disable (no Y restriction).
@@ -510,29 +519,59 @@ def run_pipeline(
                 step="obstacle",
             ) from e
     elif _mode == "rod_pair":
-        obstacle_indices, obstacle_labels = detect_obstacle_markers_rod_pair(
-            points_d,
-            visibility_min=obstacle_visibility_min,
-            visibility_floor=obstacle_visibility_floor,
-            motion_max_mm=obstacle_max_motion_mm,
-            rod_separation_axis=obstacle_rod_separation_axis,
-            rod_length_min_mm=obstacle_rod_length_min_mm,
-            rod_length_target_mm=obstacle_rod_length_target_mm,
-            rod_max_pair_candidates=obstacle_rod_max_pair_candidates,
-            rod_min_overlap_frames=obstacle_rod_min_overlap_frames,
-            rod_pair_dx_max_mm=obstacle_rod_pair_dx_max_mm,
-            rod_pair_dz_max_mm=obstacle_rod_pair_dz_max_mm,
-            rod_pair_length_tol_mm=obstacle_rod_pair_length_tol_mm,
-            rod_pair_length_tol_fraction=obstacle_rod_pair_length_tol_fraction,
-            rod_pair_p90_motion_max_mm=obstacle_rod_pair_p90_motion_max_mm,
-            rod_score_weight_x=obstacle_rod_score_weight_x,
-            rod_score_weight_length=obstacle_rod_score_weight_length,
-            rod_score_weight_z=obstacle_rod_score_weight_z,
-            rod_score_weight_motion=obstacle_rod_score_weight_motion,
-            lr_axis="y",
-            candidate_y_min_mm=obstacle_candidate_y_min_mm,
-            candidate_y_max_mm=obstacle_candidate_y_max_mm,
-        )
+        if fixed_best_frame is not None:
+            obstacle_indices, obstacle_labels = detect_obstacle_markers_rod_pair_near_frame(
+                points_d,
+                best_frame_idx=int(fixed_best_frame),
+                window_offsets=obstacle_manual_best_frame_window_offsets,
+                window_length=int(obstacle_manual_best_frame_window_length),
+                visibility_min=obstacle_visibility_min,
+                visibility_floor=obstacle_visibility_floor,
+                motion_max_mm=obstacle_max_motion_mm,
+                rod_separation_axis=obstacle_rod_separation_axis,
+                rod_length_min_mm=obstacle_rod_length_min_mm,
+                rod_length_target_mm=obstacle_rod_length_target_mm,
+                rod_max_pair_candidates=obstacle_rod_max_pair_candidates,
+                rod_min_overlap_frames=obstacle_rod_min_overlap_frames,
+                rod_pair_dx_max_mm=obstacle_rod_pair_dx_max_mm,
+                rod_pair_dz_max_mm=obstacle_rod_pair_dz_max_mm,
+                rod_pair_length_tol_mm=obstacle_rod_pair_length_tol_mm,
+                rod_pair_length_tol_fraction=obstacle_rod_pair_length_tol_fraction,
+                rod_pair_p90_motion_max_mm=obstacle_rod_pair_p90_motion_max_mm,
+                rod_score_weight_x=obstacle_rod_score_weight_x,
+                rod_score_weight_length=obstacle_rod_score_weight_length,
+                rod_score_weight_z=obstacle_rod_score_weight_z,
+                rod_score_weight_motion=obstacle_rod_score_weight_motion,
+                lr_axis="y",
+                candidate_y_min_mm=obstacle_candidate_y_min_mm,
+                candidate_y_max_mm=obstacle_candidate_y_max_mm,
+            )
+        else:
+            obstacle_indices, obstacle_labels = [], []
+        if len(obstacle_indices) < 2:
+            obstacle_indices, obstacle_labels = detect_obstacle_markers_rod_pair(
+                points_d,
+                visibility_min=obstacle_visibility_min,
+                visibility_floor=obstacle_visibility_floor,
+                motion_max_mm=obstacle_max_motion_mm,
+                rod_separation_axis=obstacle_rod_separation_axis,
+                rod_length_min_mm=obstacle_rod_length_min_mm,
+                rod_length_target_mm=obstacle_rod_length_target_mm,
+                rod_max_pair_candidates=obstacle_rod_max_pair_candidates,
+                rod_min_overlap_frames=obstacle_rod_min_overlap_frames,
+                rod_pair_dx_max_mm=obstacle_rod_pair_dx_max_mm,
+                rod_pair_dz_max_mm=obstacle_rod_pair_dz_max_mm,
+                rod_pair_length_tol_mm=obstacle_rod_pair_length_tol_mm,
+                rod_pair_length_tol_fraction=obstacle_rod_pair_length_tol_fraction,
+                rod_pair_p90_motion_max_mm=obstacle_rod_pair_p90_motion_max_mm,
+                rod_score_weight_x=obstacle_rod_score_weight_x,
+                rod_score_weight_length=obstacle_rod_score_weight_length,
+                rod_score_weight_z=obstacle_rod_score_weight_z,
+                rod_score_weight_motion=obstacle_rod_score_weight_motion,
+                lr_axis="y",
+                candidate_y_min_mm=obstacle_candidate_y_min_mm,
+                candidate_y_max_mm=obstacle_candidate_y_max_mm,
+            )
     elif _mode == "legacy":
         obstacle_indices, obstacle_labels = detect_obstacle_markers(
             points_d,

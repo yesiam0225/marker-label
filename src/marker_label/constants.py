@@ -92,6 +92,10 @@ DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X = 1.0
 DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH = 0.9
 DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z = 0.15
 DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION = 0.2
+# When ``fixed_best_frame`` is manually set, obstacle detection uses local windows around that
+# frame (majority vote) before falling back to full-trial rod_pair detection.
+DEFAULT_OBSTACLE_MANUAL_BEST_FRAME_WINDOW_OFFSETS = (-30, 0, 30)
+DEFAULT_OBSTACLE_MANUAL_BEST_FRAME_WINDOW_LENGTH = 120
 # Obstacle candidate Y band (lab mm, axis Y): only columns whose median Y lies in this interval
 # are considered. Prevents false rod pairs on markers far from the subject path (e.g. other lab objects).
 # Set both min and max to None in the pipeline to disable.

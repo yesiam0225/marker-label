@@ -7,6 +7,7 @@ from marker_label.obstacle import (
     detect_obstacle_markers,
     detect_obstacle_markers_rod_pair,
     median_motion_per_marker,
+    median_y_per_marker,
     motion_score_per_marker,
     screened_indices_extra_stationary_to_drop,
     visibility_fraction,
@@ -38,13 +39,22 @@ def test_median_motion_per_marker_shape():
     assert score.shape == (n_points,)
 
 
+def test_median_y_per_marker():
+    pts = np.zeros((5, 2, 3), dtype=np.float64)
+    pts[:, 0, 1] = [1.0, 2.0, np.nan, 4.0, 5.0]
+    pts[:, 1, 1] = np.nan
+    m = median_y_per_marker(pts)
+    assert m[0] == 3.0
+    assert np.isnan(m[1])
+
+
 def test_detect_obstacle_rod_pair_bar_along_y():
     """Two quiet endpoints on a long rod along Y; walking noise on other columns."""
     n_frames, n_pts = 150, 8
     rng = np.random.default_rng(0)
     points = rng.standard_normal((n_frames, n_pts, 3)) * 8.0 + np.array([600.0, 200.0, 400.0])
     points[:, 0, :] = np.array([100.0, 50.0, 80.0]) + rng.standard_normal((n_frames, 3)) * 0.3
-    points[:, 1, :] = np.array([110.0, 1550.0, 85.0]) + rng.standard_normal((n_frames, 3)) * 0.3
+    points[:, 1, :] = np.array([110.0, 1400.0, 85.0]) + rng.standard_normal((n_frames, 3)) * 0.3
     idx, labels = detect_obstacle_markers_rod_pair(
         points,
         visibility_min=0.95,
@@ -53,9 +63,38 @@ def test_detect_obstacle_rod_pair_bar_along_y():
         rod_length_min_mm=400.0,
         rod_separation_axis="y",
         rod_min_overlap_frames=30,
+        candidate_y_min_mm=-500.0,
+        candidate_y_max_mm=1500.0,
     )
     assert set(idx) == {0, 1}
     assert len(labels) == 2
+
+
+def test_detect_obstacle_rod_pair_y_band_removes_out_of_range_spurious_rod():
+    """In-band true rod (cols 0,1) vs a tighter fake pair at high Y: band must select 0,1."""
+    n_frames, n_pts = 120, 5
+    rng = np.random.default_rng(1)
+    points = rng.standard_normal((n_frames, n_pts, 3)) * 6.0 + np.array([500.0, 200.0, 400.0])
+    # Spurious: very collinear and long along Y, but median Y out of default band
+    points[:, 2, :] = np.array([200.0, 3500.0, 200.0]) + rng.standard_normal((n_frames, 3)) * 0.1
+    points[:, 3, :] = np.array([205.0, 4200.0, 200.0]) + rng.standard_normal((n_frames, 3)) * 0.1
+    # True rod ends inside -500..1500
+    points[:, 0, :] = np.array([150.0, 100.0, 200.0]) + rng.standard_normal((n_frames, 3)) * 0.2
+    points[:, 1, :] = np.array([150.0, 1300.0, 200.0]) + rng.standard_normal((n_frames, 3)) * 0.2
+    points[:, 4, :] = np.nan
+    idx, _labels = detect_obstacle_markers_rod_pair(
+        points,
+        visibility_min=0.95,
+        visibility_floor=0.55,
+        motion_max_mm=5.0,
+        rod_length_min_mm=400.0,
+        rod_separation_axis="y",
+        rod_max_pair_candidates=5,
+        rod_min_overlap_frames=20,
+        candidate_y_min_mm=-500.0,
+        candidate_y_max_mm=1500.0,
+    )
+    assert set(idx) == {0, 1}
 
 
 def test_detect_obstacle_two_stationary():

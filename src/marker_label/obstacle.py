@@ -6,6 +6,7 @@ standard pipeline when two obstacles exist; disabling it is for exceptional case
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 
 import numpy as np
@@ -455,6 +456,210 @@ def detect_obstacle_markers_rod_pair(
     return order_obstacle_l_r_for_screened_pair(
         points, int(best_pair[0]), int(best_pair[1]), lr_axis=lr_axis
     )
+
+
+def detect_obstacle_markers_rod_pair_near_frame(
+    points: np.ndarray,
+    *,
+    best_frame_idx: int,
+    window_offsets: Sequence[int],
+    window_length: int,
+    visibility_min: float = DEFAULT_OBSTACLE_ROD_VISIBILITY_MIN,
+    visibility_floor: float = DEFAULT_OBSTACLE_VISIBILITY_FLOOR,
+    motion_max_mm: float | None = None,
+    rod_separation_axis: str = "y",
+    rod_length_min_mm: float = DEFAULT_OBSTACLE_ROD_LENGTH_MIN_MM,
+    rod_length_target_mm: float | None = None,
+    rod_max_pair_candidates: int = DEFAULT_OBSTACLE_ROD_MAX_PAIR_CANDIDATES,
+    rod_min_overlap_frames: int = DEFAULT_OBSTACLE_ROD_MIN_OVERLAP_FRAMES,
+    rod_pair_dx_max_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_DX_MAX_MM,
+    rod_pair_dz_max_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_DZ_MAX_MM,
+    rod_pair_length_tol_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_MM,
+    rod_pair_length_tol_fraction: float = DEFAULT_OBSTACLE_ROD_PAIR_LENGTH_TOL_FRACTION,
+    rod_pair_p90_motion_max_mm: float = DEFAULT_OBSTACLE_ROD_PAIR_P90_MOTION_MAX_MM,
+    rod_score_weight_x: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_X,
+    rod_score_weight_length: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_LENGTH,
+    rod_score_weight_z: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_Z,
+    rod_score_weight_motion: float = DEFAULT_OBSTACLE_ROD_SCORE_WEIGHT_MOTION,
+    lr_axis: str = "y",
+    candidate_y_min_mm: float | None = None,
+    candidate_y_max_mm: float | None = None,
+) -> tuple[list[int], list[str]]:
+    """
+    Rod-pair obstacle detection around a manually fixed best frame.
+
+    Runs ``detect_obstacle_markers_rod_pair`` on multiple local windows centered around
+    ``best_frame_idx + offset`` and selects the winning pair by majority vote. If tied,
+    choose the pair from the center window (offset 0) when available.
+
+    Returns ``[], []`` if no local window yields a valid pair.
+    """
+    n_frames = int(points.shape[0])
+    if n_frames < 1:
+        return [], []
+    if best_frame_idx < 0 or best_frame_idx >= n_frames:
+        return [], []
+    wlen = int(window_length)
+    if wlen <= 1:
+        return [], []
+    half = wlen // 2
+    pair_votes: list[tuple[int, int]] = []
+    center_window_pair: tuple[int, int] | None = None
+
+    # Global shortlist (full trial) for robust local-window rescoring fallback.
+    med_full = median_motion_per_marker(points)
+    p90_full = p90_motion_per_marker(points)
+    vis_full = visibility_fraction(points)
+    med_y_full = (
+        median_y_per_marker(points)
+        if _obstacle_candidate_y_range_active(candidate_y_min_mm, candidate_y_max_mm)
+        else None
+    )
+    cap = DEFAULT_OBSTACLE_MAX_MOTION_MM if motion_max_mm is None else float(motion_max_mm)
+    global_candidates: list[int] = []
+    for j in range(points.shape[1]):
+        if vis_full[j] < float(visibility_floor):
+            continue
+        if vis_full[j] < float(visibility_min):
+            continue
+        if not np.isfinite(med_full[j]):
+            continue
+        if cap > 0 and float(med_full[j]) > cap:
+            continue
+        if float(rod_pair_p90_motion_max_mm) > 0 and (
+            not np.isfinite(p90_full[j]) or float(p90_full[j]) > float(rod_pair_p90_motion_max_mm)
+        ):
+            continue
+        if med_y_full is not None and not _median_y_in_candidate_band(
+            med_y_full[j], candidate_y_min_mm, candidate_y_max_mm
+        ):
+            continue
+        global_candidates.append(int(j))
+    global_candidates.sort(key=lambda j: float(med_full[j]))
+    kmax = max(2, int(rod_max_pair_candidates))
+    global_shortlist = global_candidates[: min(len(global_candidates), kmax)]
+
+    axis = str(rod_separation_axis).strip().lower()
+    if axis not in ("x", "y", "z"):
+        axis = "y"
+    axis_idx = {"x": 0, "y": 1, "z": 2}[axis]
+    min_ov = int(rod_min_overlap_frames)
+
+    def _best_pair_on_window(window_pts: np.ndarray) -> tuple[int, int] | None:
+        best_pair_local: tuple[int, int] | None = None
+        best_score_local: float | None = None
+        best_tie_local: float | None = None
+        for a in range(len(global_shortlist)):
+            for b in range(a + 1, len(global_shortlist)):
+                i, k = global_shortlist[a], global_shortlist[b]
+                both = np.isfinite(window_pts[:, i]).all(axis=1) & np.isfinite(window_pts[:, k]).all(axis=1)
+                if int(np.sum(both)) < min_ov:
+                    continue
+                pi = np.mean(window_pts[both, i, :], axis=0)
+                pk = np.mean(window_pts[both, k, :], axis=0)
+                if not (np.all(np.isfinite(pi)) and np.all(np.isfinite(pk))):
+                    continue
+                d = np.abs(pi - pk)
+                axial = float(d[axis_idx])
+                if axial < float(rod_length_min_mm):
+                    continue
+                dx = float(d[0])
+                dz = float(d[2])
+                if axis == "y":
+                    if float(rod_pair_dx_max_mm) > 0 and dx > float(rod_pair_dx_max_mm):
+                        continue
+                    if float(rod_pair_dz_max_mm) > 0 and dz > float(rod_pair_dz_max_mm):
+                        continue
+                length_penalty = 0.0
+                if rod_length_target_mm is not None and float(rod_length_target_mm) > 0:
+                    tgt = float(rod_length_target_mm)
+                    tol = max(
+                        float(rod_pair_length_tol_mm),
+                        abs(tgt) * float(rod_pair_length_tol_fraction),
+                    )
+                    length_penalty = abs(axial - tgt)
+                    if length_penalty > tol:
+                        continue
+                motion_tb = max(float(med_full[i]), float(med_full[k]))
+                score = (
+                    float(rod_score_weight_x) * dx
+                    + float(rod_score_weight_length) * length_penalty
+                    + float(rod_score_weight_z) * dz
+                    + float(rod_score_weight_motion) * motion_tb
+                )
+                if (
+                    best_score_local is None
+                    or score < best_score_local
+                    or (
+                        np.isclose(score, best_score_local)
+                        and best_tie_local is not None
+                        and motion_tb < best_tie_local
+                    )
+                ):
+                    best_score_local = score
+                    best_tie_local = motion_tb
+                    best_pair_local = (i, k)
+        return best_pair_local
+
+    for off in window_offsets:
+        c = int(best_frame_idx) + int(off)
+        if c < 0 or c >= n_frames:
+            continue
+        s = max(0, c - half)
+        e = min(n_frames, c + half)
+        if e - s < 2:
+            continue
+        local = points[s:e]
+        local_idx, _ = detect_obstacle_markers_rod_pair(
+            local,
+            visibility_min=visibility_min,
+            visibility_floor=visibility_floor,
+            motion_max_mm=motion_max_mm,
+            rod_separation_axis=rod_separation_axis,
+            rod_length_min_mm=rod_length_min_mm,
+            rod_length_target_mm=rod_length_target_mm,
+            rod_max_pair_candidates=rod_max_pair_candidates,
+            rod_min_overlap_frames=rod_min_overlap_frames,
+            rod_pair_dx_max_mm=rod_pair_dx_max_mm,
+            rod_pair_dz_max_mm=rod_pair_dz_max_mm,
+            rod_pair_length_tol_mm=rod_pair_length_tol_mm,
+            rod_pair_length_tol_fraction=rod_pair_length_tol_fraction,
+            rod_pair_p90_motion_max_mm=rod_pair_p90_motion_max_mm,
+            rod_score_weight_x=rod_score_weight_x,
+            rod_score_weight_length=rod_score_weight_length,
+            rod_score_weight_z=rod_score_weight_z,
+            rod_score_weight_motion=rod_score_weight_motion,
+            lr_axis=lr_axis,
+            candidate_y_min_mm=candidate_y_min_mm,
+            candidate_y_max_mm=candidate_y_max_mm,
+        )
+        if len(local_idx) >= 2:
+            pair = tuple(sorted((int(local_idx[0]), int(local_idx[1]))))
+        else:
+            best_local = _best_pair_on_window(local)
+            if best_local is None:
+                continue
+            pair = tuple(sorted((int(best_local[0]), int(best_local[1]))))
+        pair_votes.append(pair)
+        if int(off) == 0:
+            center_window_pair = pair
+
+    if not pair_votes:
+        return [], []
+    cnt = Counter(pair_votes)
+    top = max(cnt.values())
+    winners = sorted([p for p, n in cnt.items() if n == top])
+    selected_pair = (
+        center_window_pair
+        if center_window_pair is not None and center_window_pair in winners
+        else winners[0]
+    )
+    try:
+        return order_obstacle_l_r_for_screened_pair(
+            points, int(selected_pair[0]), int(selected_pair[1]), lr_axis=lr_axis
+        )
+    except ValueError:
+        return [], []
 
 
 def order_obstacle_l_r_for_screened_pair(
