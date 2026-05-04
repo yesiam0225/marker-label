@@ -14,6 +14,8 @@ from marker_label.obstacle import (
 )
 from marker_label.body_labeling import match_markers_to_template, best_frame_for_matching
 from marker_label.gap_fill import fill_gaps_1d, fill_gaps_trajectory
+from marker_label.errors import LabelingPipelineError
+from marker_label.pipeline import loaded_column_indices_matching_label_regex
 
 
 def test_motion_score_shape():
@@ -185,3 +187,14 @@ def test_fill_gaps_trajectory():
     pts[1:3, :] = np.nan
     out = fill_gaps_trajectory(pts, max_interp_frames=10)
     assert np.isfinite(out).all()
+
+
+def test_loaded_column_indices_matching_label_regex():
+    labels = ["A", "*1                            ", "B*", "xx*yy"]
+    assert loaded_column_indices_matching_label_regex(labels, r"^\*") == [1]
+    assert loaded_column_indices_matching_label_regex(labels, r"\*") == [1, 2, 3]
+
+
+def test_loaded_column_indices_matching_label_regex_invalid():
+    with pytest.raises(LabelingPipelineError):
+        loaded_column_indices_matching_label_regex(["a"], "(")

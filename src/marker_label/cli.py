@@ -311,7 +311,7 @@ def main() -> None:
         "--y-range-screening",
         action="store_true",
         help=(
-            "Enable Step 1: drop columns by fixed lab Y band (±1.5 m rule). "
+            "Enable Step 1: drop columns by fixed lab Y band ([-1000, 1000] mm by default). "
             "Default: Step 1 is skipped."
         ),
     )
@@ -371,6 +371,18 @@ def main() -> None:
         default=None,
         metavar="I[,J,...]",
         help="0-based column indices to remove from loaded dynamic (comma-separated), before Y/visibility screening.",
+    )
+    parser.add_argument(
+        "--drop-loaded-label-regex",
+        type=str,
+        default=None,
+        metavar="PATTERN",
+        help=(
+            "Python re pattern: drop loaded dynamic columns whose stripped marker name matches "
+            "via re.search (before Y/visibility screening). Union with --drop-loaded-columns. "
+            "If a trial uses only placeholder names (e.g. *0…*N), a broad pattern can match all "
+            "columns; narrow the regex or use --drop-loaded-columns / --auto-drop-missing-fraction."
+        ),
     )
     parser.add_argument(
         "--skip-labels",
@@ -604,6 +616,7 @@ def main() -> None:
             min_finite_y_frames=args.min_finite_y_frames,
             unlabeled_numeric_base=args.unlabeled_label_base,
             drop_loaded_column_indices=drop_loaded_columns,
+            drop_loaded_column_label_regex=args.drop_loaded_label_regex,
             skip_label_names=skip_labels,
             fixed_best_frame=args.best_frame,
             auto_drop_missing_fraction_ge=args.auto_drop_missing_fraction,

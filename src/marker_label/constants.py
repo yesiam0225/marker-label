@@ -114,13 +114,13 @@ DEFAULT_MIDDLE_START = 0.20
 DEFAULT_MIDDLE_END = 0.80
 
 # Dynamic trial initial screening (see docs/DYNAMIC_TRIAL_INITIAL_SCREENING_PLAN.md)
-SCREENING_Y_MIN_MM = -1500
-SCREENING_Y_MAX_MM = 1500
+SCREENING_Y_MIN_MM = -1000
+SCREENING_Y_MAX_MM = 1000
 # Step 1 (Y range): drop column if too few finite-Y frames, or if fraction of finite-Y
 # frames with Y outside [y_min, y_max] exceeds this (denominator = count of finite Y).
 SCREENING_Y_MIN_FINITE_FRAMES = 5
 SCREENING_Y_OUTSIDE_FRACTION_THRESHOLD = 0.40
-SCREENING_VISIBILITY_MIN = 0.30  # Step 2: drop columns with visibility < this
+SCREENING_VISIBILITY_MIN = 0.25  # Step 2: drop columns with visibility < this
 # Expected marker count after screening: 39 body + 2 obstacles (raise if different)
 EXPECTED_SCREENED_MARKERS = 41  # 39 body + 2 obstacles
 # After extra stationary drop: require at least this many screened columns (39 body + 2 obstacles).

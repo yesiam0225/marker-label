@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from .constants import (
 from .errors import (
     ERR_AUTO_DROP_INVALID_THRESHOLD,
     ERR_AUTO_DROP_REMOVE_ALL,
+    ERR_DROP_LABEL_REGEX_INVALID,
     ERR_BODY_COLUMNS_LT_MIN,
     ERR_DROP_COLUMN_OUT_OF_RANGE,
     ERR_DROP_COLUMN_REMOVE_ALL,
@@ -84,6 +86,31 @@ from .export import build_full_trajectory_matrix, export_labeled
 
 # Facing axis: subject's forward direction in lab (z = up). Used to align dynamic to static.
 FACING_AXIS_OPTIONS = ("x", "-x", "y", "-y")
+
+
+def loaded_column_indices_matching_label_regex(
+    labels: Sequence[str],
+    pattern: str,
+) -> list[int]:
+    """
+    Loaded-file 0-based column indices whose stripped label matches ``pattern``.
+
+    Uses ``re.search`` (not fullmatch). Raises :class:`LabelingPipelineError` if ``pattern`` is
+    not a valid regular expression.
+    """
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        raise LabelingPipelineError(
+            ERR_DROP_LABEL_REGEX_INVALID,
+            f"invalid label regex {pattern!r}: {e}",
+            step="drop_columns",
+        ) from e
+    out: list[int] = []
+    for i, lab in enumerate(labels):
+        if rx.search(str(lab).strip()):
+            out.append(i)
+    return out
 
 
 def apply_drop_loaded_column_indices_to_c3d_dict(
@@ -300,6 +327,7 @@ def run_pipeline(
     min_finite_y_frames: int | None = None,
     unlabeled_numeric_base: int | None = None,
     drop_loaded_column_indices: Sequence[int] | None = None,
+    drop_loaded_column_label_regex: str | None = None,
     skip_label_names: Sequence[str] | None = None,
     fixed_best_frame: int | None = None,
     auto_drop_missing_fraction_ge: float | None = None,
@@ -376,6 +404,11 @@ def run_pipeline(
     unlabeled_numeric_base : added to loaded 0-based index for unlabeled marker names in export (None = constant).
     drop_loaded_column_indices : optional 0-based point column indices to remove from dynamic
         immediately after ``load_c3d`` (before screening). Per-trial fix for bad channels.
+        Unioned with columns matched by ``drop_loaded_column_label_regex`` (if set).
+    drop_loaded_column_label_regex : optional Python ``re`` pattern; drop any loaded column whose
+        stripped marker name matches via ``re.search``. Combined with ``drop_loaded_column_indices``.
+        Use a **narrow** pattern when all trial names are placeholders (e.g. ``*0``…``*N``), or
+        every column may match and the pipeline will raise.
     skip_label_names : optional anatomical labels to **not** assign during body labeling, applied
         after column drop and screening. Output omits these columns entirely (no NaN placeholders).
     fixed_best_frame : optional 0-based frame index for head/Z-band assignment (skips automatic
@@ -409,13 +442,25 @@ def run_pipeline(
     points_s = static["points"]
     labels_s = static["labels"]
     original_n_dynamic = int(dynamic["points"].shape[1])
-    drop_set = (
-        frozenset(int(i) for i in drop_loaded_column_indices)
-        if drop_loaded_column_indices
-        else frozenset()
+    labels_d = list(dynamic.get("labels") or [])
+    while len(labels_d) < original_n_dynamic:
+        labels_d.append(f"Point_{len(labels_d)}")
+
+    explicit_drop = (
+        [int(i) for i in drop_loaded_column_indices] if drop_loaded_column_indices else []
     )
-    if drop_loaded_column_indices:
-        apply_drop_loaded_column_indices_to_c3d_dict(dynamic, drop_loaded_column_indices)
+    regex_drop: list[int] = []
+    if drop_loaded_column_label_regex is not None and str(drop_loaded_column_label_regex).strip():
+        pat = str(drop_loaded_column_label_regex).strip()
+        regex_drop = loaded_column_indices_matching_label_regex(labels_d, pat)
+        print(
+            f"drop_loaded_column_label_regex {pat!r} matched {len(regex_drop)} "
+            f"loaded column(s) (0-based): {regex_drop}"
+        )
+
+    drop_set = frozenset(explicit_drop) | frozenset(regex_drop)
+    if drop_set:
+        apply_drop_loaded_column_indices_to_c3d_dict(dynamic, sorted(drop_set))
     # Map each dynamic column (after optional drop) -> original loaded file 0-based column index
     loaded_column_aliases = np.array(
         [j for j in range(original_n_dynamic) if j not in drop_set],
