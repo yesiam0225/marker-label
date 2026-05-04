@@ -573,6 +573,8 @@ def assign_strn_t10_arm4_after_clav_rbak(
     template: dict,
     *,
     skipped_label_upper: frozenset[str] | None = None,
+    clav_body_idx: int | None = None,
+    c7_body_idx: int | None = None,
 ) -> list[tuple[int, str]]:
     """
     After CLAV/RBAK: from remaining points take the 6 highest Z. Two points with Y
@@ -580,6 +582,13 @@ def assign_strn_t10_arm4_after_clav_rbak(
     comparison (no centroid). The remaining 4 points: split by L/R (direct Y), then
     within each side higher Z = UPA, lower Z = ELB. All comparisons use point
     values directly (no centroid).
+
+    When ``clav_body_idx`` and ``c7_body_idx`` are set (>= 0) with finite CLAV/C7 Y,
+    STRN is chosen among ``in_band`` points with smallest |Y − Y_CLAV|, breaking ties
+    by most anterior (minimum dot_back). T10 is then chosen among the remaining
+    ``in_band`` points with smallest |Y − Y_C7|, breaking ties by most posterior
+    (maximum dot_back). Otherwise STRN/T10 are the most anterior and most posterior
+    in ``in_band`` by dot_back (two distinct indices when possible).
     """
     y_lsho = points_frame[lsho_idx, 1]
     y_rsho = points_frame[rsho_idx, 1]
@@ -611,9 +620,54 @@ def assign_strn_t10_arm4_after_clav_rbak(
         dot_back = np.array([
             float(points_frame[i, :2] @ d_back_xy) for i in in_band
         ])
-        order_ap = np.argsort(dot_back)
-        anterior_pt = in_band[order_ap[0]]
-        posterior_pt = in_band[order_ap[1]]
+        ib_to_dot = {in_band[j]: float(dot_back[j]) for j in range(len(in_band))}
+        use_y_refs = (
+            clav_body_idx is not None
+            and c7_body_idx is not None
+            and int(clav_body_idx) >= 0
+            and int(c7_body_idx) >= 0
+            and np.isfinite(points_frame[int(clav_body_idx), 1])
+            and np.isfinite(points_frame[int(c7_body_idx), 1])
+        )
+        _y_tol_mm = 1.0  # tie band for |Y − Y_ref| (mm)
+        if use_y_refs:
+            y_clav = float(points_frame[int(clav_body_idx), 1])
+            y_c7 = float(points_frame[int(c7_body_idx), 1])
+            dy_clav = np.array(
+                [abs(float(points_frame[i, 1]) - y_clav) for i in in_band],
+                dtype=np.float64,
+            )
+            min_clav = float(np.min(dy_clav))
+            pool_strn = [
+                in_band[j]
+                for j in range(len(in_band))
+                if dy_clav[j] <= min_clav + _y_tol_mm
+            ]
+            anterior_pt = min(pool_strn, key=lambda pi: ib_to_dot[pi])
+            rem = [i for i in in_band if i != anterior_pt]
+            if len(rem) == 1:
+                posterior_pt = rem[0]
+            else:
+                dy_c7 = np.array(
+                    [abs(float(points_frame[i, 1]) - y_c7) for i in rem],
+                    dtype=np.float64,
+                )
+                min_c7 = float(np.min(dy_c7))
+                pool_t10 = [
+                    rem[j]
+                    for j in range(len(rem))
+                    if dy_c7[j] <= min_c7 + _y_tol_mm
+                ]
+                posterior_pt = max(pool_t10, key=lambda pi: ib_to_dot[pi])
+        else:
+            i_min = int(np.argmin(dot_back))
+            i_max = int(np.argmax(dot_back))
+            anterior_pt = in_band[i_min]
+            posterior_pt = in_band[i_max]
+            if anterior_pt == posterior_pt:
+                order_ap = np.argsort(dot_back)
+                anterior_pt = in_band[int(order_ap[0])]
+                posterior_pt = in_band[int(order_ap[1])]
         strn_t10_consumed = {anterior_pt, posterior_pt}
         strn_t10_assignments = [
             (p, lab)
@@ -1745,6 +1799,14 @@ def label_body_markers(
             and any(str(lab).strip().upper() in STRN_T10_ARM_MARKERS_SET for lab in template)
         )
         if use_strn_t10_arm and lsho_idx >= 0 and rsho_idx >= 0:
+            c7_body_idx = next(
+                (pi for pi, lab in c7_shoulder_assignments if str(lab).strip().upper() == "C7"),
+                -1,
+            )
+            clav_body_idx = next(
+                (pi for pi, lab in clav_rbak_assignments if str(lab).strip().upper() == "CLAV"),
+                -1,
+            )
             strn_t10_arm_assignments = assign_strn_t10_arm4_after_clav_rbak(
                 points_dynamic[best_f],
                 d_back_xy,
@@ -1754,6 +1816,8 @@ def label_body_markers(
                 rsho_idx,
                 template,
                 skipped_label_upper=skipped_upper,
+                clav_body_idx=clav_body_idx if clav_body_idx >= 0 else None,
+                c7_body_idx=c7_body_idx if c7_body_idx >= 0 else None,
             )
             _trace_pairs("strn_t10_arm4", strn_t10_arm_assignments)
             if strn_t10_arm_assignments:

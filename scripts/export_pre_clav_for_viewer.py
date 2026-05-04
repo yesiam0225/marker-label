@@ -169,6 +169,14 @@ def main() -> None:
     run_strn_t10_arm = args.through_strn_t10_arm or args.through_pelvis_arm12
     if run_strn_t10_arm and lsho_idx >= 0 and rsho_idx >= 0 and len(clav_rbak_assignments) >= 2:
         priority_pt_set = head_pt_set | {pi for pi, _ in c7_shoulder_assignments} | {pi for pi, _ in clav_rbak_assignments}
+        c7_body_idx = next(
+            (pi for pi, lab in c7_shoulder_assignments if str(lab).strip().upper() == "C7"),
+            -1,
+        )
+        clav_body_idx = next(
+            (pi for pi, lab in clav_rbak_assignments if str(lab).strip().upper() == "CLAV"),
+            -1,
+        )
         strn_t10_arm_assignments = assign_strn_t10_arm4_after_clav_rbak(
             points_d_body[best_f],
             d_back,
@@ -177,6 +185,8 @@ def main() -> None:
             lsho_idx,
             rsho_idx,
             template_body if template_body else template,
+            clav_body_idx=clav_body_idx if clav_body_idx >= 0 else None,
+            c7_body_idx=c7_body_idx if c7_body_idx >= 0 else None,
         )
 
     pelvis_arm12_assignments: list[tuple[int, str]] = []
