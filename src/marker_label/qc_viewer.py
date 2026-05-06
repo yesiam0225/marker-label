@@ -5,7 +5,7 @@ PyVista-based 3D viewer for labeled C3D/CSV. Playback and rotate view.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -13,6 +13,31 @@ try:
     import pyvista as pv
 except ImportError as e:
     raise ImportError('Install PyVista: pip install "marker-label[qc]" or pip install pyvista') from e
+
+
+def _frame_points_y_clipped(
+    pts_f: np.ndarray,
+    y_min_mm: float | None,
+    y_max_mm: float | None,
+) -> np.ndarray:
+    """
+    Return a copy of one frame (n_markers, 3) with markers outside the lab-Y band set to NaN.
+
+    Used so spheres and segment sticks omit out-of-range markers without shifting indices.
+    """
+    p = pts_f.copy()
+    if y_min_mm is not None:
+        bad = np.isfinite(p[:, 1]) & (p[:, 1] < float(y_min_mm))
+        p[bad] = np.nan
+    if y_max_mm is not None:
+        bad = np.isfinite(p[:, 1]) & (p[:, 1] > float(y_max_mm))
+        p[bad] = np.nan
+    return p
+
+
+def _finite_rows(pts: np.ndarray) -> np.ndarray:
+    """Boolean mask (n_markers,) — row has finite x, y, z."""
+    return np.isfinite(pts).all(axis=1)
 
 
 def load_data(path: str, scale_factor: float = 1.0) -> tuple[np.ndarray, list[str], float]:
@@ -41,6 +66,8 @@ def run_viewer(
     segment_color: str = "darkblue",
     scale_factor: float = 1.0,
     label_font_size: float = 18.0,
+    y_clip_min_mm: float | None = None,
+    y_clip_max_mm: float | None = None,
 ) -> None:
     """
     Open PyVista window: 3D markers and body segments (sticks), play/stop/back/forward.
@@ -58,6 +85,8 @@ def run_viewer(
     segment_color : color of segment lines (default 'darkblue')
     scale_factor : multiply coordinates by this (e.g. 1000 if file is in meters and you want to display as mm).
     label_font_size : font size for point labels (default 18). Use --font-size in CLI to override.
+    y_clip_min_mm : if set, hide markers (and segment endpoints) with lab Y below this (mm, after scale_factor).
+    y_clip_max_mm : if set, hide markers with lab Y above this (mm, after scale_factor).
     """
     from .segments import segment_lines_for_frame_by_segment, SEGMENT_COLORS, SEGMENTS
 
@@ -73,17 +102,37 @@ def run_viewer(
             best_frame_1based = int(bestframe_path.read_text().strip().split()[0])
         except (ValueError, IndexError, OSError):
             pass
-    # Replace NaN with 0 for display (markers)
+    use_y_clip = y_clip_min_mm is not None or y_clip_max_mm is not None
+    # Full array for NaN handling when not clipping; Y-clip path uses NaN to drop spheres/segments
     pts_display = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def frame_for_segments(f: int) -> np.ndarray:
+        raw = points[f]
+        if use_y_clip:
+            return _frame_points_y_clipped(raw, y_clip_min_mm, y_clip_max_mm)
+        return raw
+
+    def frame_for_cloud(f: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return (positions (n,3), valid scalar (n,)) for marker cloud."""
+        raw = points[f]
+        if use_y_clip:
+            clipped = _frame_points_y_clipped(raw, y_clip_min_mm, y_clip_max_mm)
+            vis = _finite_rows(raw) & _finite_rows(clipped)
+            pos = np.where(vis[:, np.newaxis], np.nan_to_num(clipped, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+            return pos, vis.astype(np.float32)
+        pos = pts_display[f]
+        valid = np.isfinite(points[f]).all(axis=1).astype(np.float32)
+        return pos, valid
+
     # Frame interval in ms for timer
     if rate > 0 and playback_speed > 0:
         dt_ms = max(10, int(1000.0 / (rate * playback_speed)))
     else:
         dt_ms = 50
     # Build initial point cloud (first frame)
-    first = pts_display[0]
-    cloud = pv.PolyData(first)
-    cloud["valid"] = np.isfinite(points[0]).all(axis=1).astype(np.float32)
+    first_pos, first_valid = frame_for_cloud(0)
+    cloud = pv.PolyData(first_pos)
+    cloud["valid"] = first_valid
     plotter = pv.Plotter(title=str(Path(path).name))
     plotter.set_background(background)
     plotter.add_mesh(
@@ -110,7 +159,7 @@ def run_viewer(
             except Exception:
                 pass
 
-    add_segment_meshes(points[0])
+    add_segment_meshes(frame_for_segments(0))
     # Obstacle labels: find OBSTACLE_L / OBSTACLE_R indices; display as OBS1, OBS2
     label_stripped = [str(lab).strip() for lab in labels]
     obstacle_indices = []
@@ -209,6 +258,19 @@ def run_viewer(
         pelvis_arm12_text_color, pelvis_arm12_shape_color = "magenta", "dimgrey"
         leg_foot12_text_color, leg_foot12_shape_color = "lightgreen", "dimgrey"
 
+    def _label_frame_points(f: int) -> np.ndarray:
+        if use_y_clip:
+            return _frame_points_y_clipped(points[f], y_clip_min_mm, y_clip_max_mm)
+        return pts_display[f]
+
+    def _finite_label_cloud(pts_block: np.ndarray, names_seq: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+        """Drop rows with non-finite coordinates (e.g. Y-clipped or missing)."""
+        names_arr = np.asarray(list(names_seq), dtype="U")
+        m = np.isfinite(pts_block).all(axis=1)
+        if not np.any(m):
+            return np.empty((0, 3), dtype=np.float64), np.array([], dtype="U")
+        return pts_block[m], names_arr[m]
+
     def add_obstacle_labels(f: int) -> None:
         try:
             plotter.remove_actor("obstacle_labels")
@@ -216,10 +278,12 @@ def run_viewer(
             pass
         if not obstacle_indices:
             return
-        pts_f = pts_display[f]
-        obs_pts = pts_f[obstacle_indices]
+        pts_f = _label_frame_points(f)
+        obs_pts, obs_nm = _finite_label_cloud(pts_f[obstacle_indices], obstacle_display_names)
+        if obs_pts.shape[0] == 0:
+            return
         obs_cloud = pv.PolyData(obs_pts)
-        obs_cloud["names"] = np.array(obstacle_display_names, dtype="U")
+        obs_cloud["names"] = obs_nm
         plotter.add_point_labels(
             obs_cloud,
             "names",
@@ -239,10 +303,12 @@ def run_viewer(
             pass
         if not head_indices:
             return
-        pts_f = pts_display[f]
-        head_pts = pts_f[head_indices]
+        pts_f = _label_frame_points(f)
+        head_pts, head_nm = _finite_label_cloud(pts_f[head_indices], head_names)
+        if head_pts.shape[0] == 0:
+            return
         head_cloud = pv.PolyData(head_pts)
-        head_cloud["names"] = np.array(head_names, dtype="U")
+        head_cloud["names"] = head_nm
         plotter.add_point_labels(
             head_cloud,
             "names",
@@ -262,10 +328,12 @@ def run_viewer(
             pass
         if not c7_shoulder_indices:
             return
-        pts_f = pts_display[f]
-        c7_pts = pts_f[c7_shoulder_indices]
+        pts_f = _label_frame_points(f)
+        c7_pts, c7_nm = _finite_label_cloud(pts_f[c7_shoulder_indices], c7_shoulder_names)
+        if c7_pts.shape[0] == 0:
+            return
         c7_cloud = pv.PolyData(c7_pts)
-        c7_cloud["names"] = np.array(c7_shoulder_names, dtype="U")
+        c7_cloud["names"] = c7_nm
         plotter.add_point_labels(
             c7_cloud,
             "names",
@@ -285,10 +353,12 @@ def run_viewer(
             pass
         if not clav_rbak_indices:
             return
-        pts_f = pts_display[f]
-        clav_pts = pts_f[clav_rbak_indices]
+        pts_f = _label_frame_points(f)
+        clav_pts, clav_nm = _finite_label_cloud(pts_f[clav_rbak_indices], clav_rbak_names)
+        if clav_pts.shape[0] == 0:
+            return
         clav_cloud = pv.PolyData(clav_pts)
-        clav_cloud["names"] = np.array(clav_rbak_names, dtype="U")
+        clav_cloud["names"] = clav_nm
         plotter.add_point_labels(
             clav_cloud,
             "names",
@@ -308,10 +378,12 @@ def run_viewer(
             pass
         if not strn_t10_arm_indices:
             return
-        pts_f = pts_display[f]
-        arm_pts = pts_f[strn_t10_arm_indices]
+        pts_f = _label_frame_points(f)
+        arm_pts, arm_nm = _finite_label_cloud(pts_f[strn_t10_arm_indices], strn_t10_arm_names)
+        if arm_pts.shape[0] == 0:
+            return
         arm_cloud = pv.PolyData(arm_pts)
-        arm_cloud["names"] = np.array(strn_t10_arm_names, dtype="U")
+        arm_cloud["names"] = arm_nm
         plotter.add_point_labels(
             arm_cloud,
             "names",
@@ -331,10 +403,12 @@ def run_viewer(
             pass
         if not pelvis_arm12_indices:
             return
-        pts_f = pts_display[f]
-        pa_pts = pts_f[pelvis_arm12_indices]
+        pts_f = _label_frame_points(f)
+        pa_pts, pa_nm = _finite_label_cloud(pts_f[pelvis_arm12_indices], pelvis_arm12_names)
+        if pa_pts.shape[0] == 0:
+            return
         pa_cloud = pv.PolyData(pa_pts)
-        pa_cloud["names"] = np.array(pelvis_arm12_names, dtype="U")
+        pa_cloud["names"] = pa_nm
         plotter.add_point_labels(
             pa_cloud,
             "names",
@@ -354,10 +428,12 @@ def run_viewer(
             pass
         if not leg_foot12_indices:
             return
-        pts_f = pts_display[f]
-        lf_pts = pts_f[leg_foot12_indices]
+        pts_f = _label_frame_points(f)
+        lf_pts, lf_nm = _finite_label_cloud(pts_f[leg_foot12_indices], leg_foot12_names)
+        if lf_pts.shape[0] == 0:
+            return
         lf_cloud = pv.PolyData(lf_pts)
-        lf_cloud["names"] = np.array(leg_foot12_names, dtype="U")
+        lf_cloud["names"] = lf_nm
         plotter.add_point_labels(
             lf_cloud,
             "names",
@@ -377,10 +453,12 @@ def run_viewer(
             pass
         if not other_indices:
             return
-        pts_f = pts_display[f]
-        other_pts = pts_f[other_indices]
+        pts_f = _label_frame_points(f)
+        other_pts, other_nm = _finite_label_cloud(pts_f[other_indices], other_names)
+        if other_pts.shape[0] == 0:
+            return
         other_cloud = pv.PolyData(other_pts)
-        other_cloud["names"] = np.array(other_names, dtype="U")
+        other_cloud["names"] = other_nm
         _text = "grey" if background == "white" else "lightgrey"
         _shape = "lightgrey" if background == "white" else "dimgrey"
         plotter.add_point_labels(
@@ -399,6 +477,13 @@ def run_viewer(
         base = f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)"
         if best_frame_1based is not None:
             base += f"  Best frame: {best_frame_1based}"
+        if use_y_clip:
+            parts: list[str] = []
+            if y_clip_min_mm is not None:
+                parts.append(f"Y≥{y_clip_min_mm:g} mm")
+            if y_clip_max_mm is not None:
+                parts.append(f"Y≤{y_clip_max_mm:g} mm")
+            base += "  [" + ", ".join(parts) + "]"
         return base
 
     add_obstacle_labels(0)
@@ -419,11 +504,12 @@ def run_viewer(
     def set_frame(f: int) -> None:
         f = max(0, min(n_frames - 1, f))
         frame_idx[0] = f
-        cloud.points = pts_display[f]
-        cloud["valid"] = np.isfinite(points[f]).all(axis=1).astype(np.float32)
+        pos, valid = frame_for_cloud(f)
+        cloud.points = pos
+        cloud["valid"] = valid
         # Update segment lines for this frame (per-segment colors)
         remove_segment_meshes()
-        add_segment_meshes(points[f])
+        add_segment_meshes(frame_for_segments(f))
         add_obstacle_labels(f)
         add_head_labels(f)
         add_c7_shoulder_labels(f)
@@ -701,6 +787,20 @@ def main() -> None:
     parser.add_argument("--background", choices=("white", "black"), default="white", help="Background color")
     parser.add_argument("--segment-color", default="darkblue", help="Color of segment lines (default darkblue)")
     parser.add_argument("--scale", type=float, default=1.0, metavar="FACTOR", help="Multiply coordinates by FACTOR (e.g. 1000 if file is in meters; default 1)")
+    parser.add_argument(
+        "--y-clip-min",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Hide markers and segment endpoints with lab Y below this (mm, after --scale). Example: -1000",
+    )
+    parser.add_argument(
+        "--y-clip-max",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Hide markers with lab Y above this (mm, after --scale).",
+    )
     args = parser.parse_args()
     run_viewer(
         args.file,
@@ -710,6 +810,8 @@ def main() -> None:
         segment_color=args.segment_color,
         scale_factor=args.scale,
         label_font_size=args.font_size,
+        y_clip_min_mm=args.y_clip_min,
+        y_clip_max_mm=args.y_clip_max,
     )
 
 
