@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 qc = ["pyvista>=0.38"]
-dev = ["pytest>=7", "ruff>=0.1"]
+dev = ["pytest>=7", "ruff>=0.1", "matplotlib>=3.5"]
 
 [project.scripts]
 marker-label = "marker_label.cli:main"
@@ -25,6 +25,9 @@ marker-label-view = "marker_label.qc_viewer:main"
 marker-label-compare = "marker_label.qc_viewer:main_compare"
 marker-label-analyze = "marker_label.analyze_reference:main"
 marker-label-trim-csv = "marker_label.trim_labeled_csv_cli:main"
+marker-label-trial-trim = "marker_label.trial_trim:main"
+marker-label-trim-frames = "marker_label.trim_csv_by_frames:main"
+marker-label-trim-combine = "marker_label.trial_trim_combine:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marker_label"]
