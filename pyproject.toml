@@ -12,11 +12,13 @@ dependencies = [
     "c3d>=0.5",
     "numpy>=1.20",
     "scipy>=1.7",
+    "pandas>=1.3",
+    "matplotlib>=3.5",
 ]
 
 [project.optional-dependencies]
 qc = ["pyvista>=0.38"]
-dev = ["pytest>=7", "ruff>=0.1", "matplotlib>=3.5"]
+dev = ["pytest>=7", "ruff>=0.1"]
 
 [project.scripts]
 marker-label = "marker_label.cli:main"
@@ -28,6 +30,7 @@ marker-label-trim-csv = "marker_label.trim_labeled_csv_cli:main"
 marker-label-trial-trim = "marker_label.trial_trim:main"
 marker-label-trim-frames = "marker_label.trim_csv_by_frames:main"
 marker-label-trim-combine = "marker_label.trial_trim_combine:main"
+marker-label-correct-trimmed = "marker_label.trimmed_csv_marker_correction:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marker_label"]
