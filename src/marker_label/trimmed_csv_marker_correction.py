@@ -5,6 +5,11 @@ Uses reference geometry from the **original** trial (``original_best_frame`` arg
 original CSV's ``*.csv.bestframe`` when that argument is ``None``) and tier-based
 rules so upper-body markers (not verified by leg-only trim) can be envelope-filtered, swapped,
 rejected, or reassigned from unlabeled columns.
+
+Staged pipeline: **envelope (1)** → **pelvis combinatorial swap (2)** → chain / same / cross-segment swaps
+→ rejection → unlabeled assignment → continuity. Stage 5 assigns unlabeled points with
+**priority 1** for markers invalidated in stages 1 or 4, then **priority 2** for originally
+occluded (missing) markers, so recoverable points are not taken by unrelated gaps first.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from .trial_trim import (
     segment_markers_dict_for_trim_preset,
 )
 from .trial_trim_combine import compute_subject_envelope
+from .walking_setup import determine_setup
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +58,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # If the requested frame lacks finite markers for some segment, search this many
     # trial frames (by frame column) away before failing. Set to 0 to require an exact row only.
     "reference_frame_search_radius": 150,
+    "chain_swap_y_separation_min_mm": 100.0,
+    "chain_swap_side_offset_min_mm": 50.0,
+    "chain_swap_min_consecutive_frames": 10,
+    "chain_swap_min_visible_per_side": 2,
+}
+
+DEFAULT_BILATERAL_CHAINS: dict[str, tuple[list[str], list[str]]] = {
+    "arm": (
+        ["LSHO", "LUPA", "LELB", "LFRM", "LWRA", "LWRB", "LFIN"],
+        ["RSHO", "RUPA", "RELB", "RFRM", "RWRA", "RWRB", "RFIN"],
+    ),
 }
 
 DEFAULT_SAME_SEGMENT_SWAP_PAIRS: tuple[tuple[str, str], ...] = (
@@ -65,6 +82,22 @@ DEFAULT_SAME_SEGMENT_SWAP_PAIRS: tuple[tuple[str, str], ...] = (
     ("LWRA", "LWRB"),
     ("RWRA", "RWRB"),
 )
+
+def filter_same_segment_swap_pairs(
+    base: Sequence[tuple[str, str]],
+    exclude_pairs: Sequence[tuple[str, str]] | None,
+) -> tuple[tuple[str, str], ...]:
+    """Return ``base`` without any pair whose unordered marker set matches an entry in ``exclude_pairs``."""
+    if not exclude_pairs:
+        return tuple(base)
+    banned = {frozenset({str(a).strip(), str(b).strip()}) for a, b in exclude_pairs}
+    out: list[tuple[str, str]] = []
+    for m1, m2 in base:
+        if frozenset({str(m1).strip(), str(m2).strip()}) in banned:
+            continue
+        out.append((str(m1).strip(), str(m2).strip()))
+    return tuple(out)
+
 
 DEFAULT_CROSS_SEGMENT_SWAP_PAIRS: tuple[tuple[str, str], ...] = (
     ("LASI", "LWRA"),
@@ -101,6 +134,238 @@ def load_best_frame(bestframe_path: str | Path) -> int:
     if not text:
         raise ValueError(f"Empty bestframe file: {p}")
     return int(text[0])
+
+
+def _meta_markers_dict(meta: dict[str, Any]) -> dict[str, np.ndarray]:
+    points: np.ndarray = meta["points"]
+    stems: list[str] = meta["all_stems"]
+    return {str(st): points[:, i, :] for i, st in enumerate(stems)}
+
+
+def determine_chain_swap_setup(
+    meta_orig: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Auto-detect ML axis and left-side sign for chain swap detection.
+
+    Uses the same setup detection logic as trim/combine (without obstacle requirement).
+    """
+    return determine_setup(_meta_markers_dict(meta_orig), obstacle_pair=None, warnings_list=[])
+
+
+def find_consecutive_intervals(bool_array: Sequence[bool], min_length: int) -> list[tuple[int, int]]:
+    """Return ``(start_row, end_row)`` inclusive for each run of True with length >= ``min_length`` (row indices)."""
+    intervals: list[tuple[int, int]] = []
+    in_run = False
+    run_start = 0
+    arr = list(bool_array)
+    n = len(arr)
+    k = int(min_length)
+    if k < 1:
+        return intervals
+    for i, val in enumerate(arr):
+        if val and not in_run:
+            in_run = True
+            run_start = i
+        elif not val and in_run:
+            if i - run_start >= k:
+                intervals.append((run_start, i - 1))
+            in_run = False
+    if in_run and n - run_start >= k:
+        intervals.append((run_start, n - 1))
+    return intervals
+
+
+def detect_chain_swap_at_frame(
+    points: np.ndarray,
+    row_f: int,
+    label_to_idx: Mapping[str, int],
+    chain_left: Sequence[str],
+    chain_right: Sequence[str],
+    ml_axis: int,
+    left_ml_sign: int,
+    cfg: Mapping[str, Any],
+) -> bool:
+    """
+    True if both bilateral chains appear on the wrong ML side of the pelvis midline.
+
+    Requires finite ``LASI`` and ``RASI`` at ``row_f``. Markers missing from the CSV are skipped.
+    """
+    if "LASI" not in label_to_idx or "RASI" not in label_to_idx:
+        return False
+    i_la, i_ra = label_to_idx["LASI"], label_to_idx["RASI"]
+    p_la = points[row_f, i_la, :]
+    p_ra = points[row_f, i_ra, :]
+    if not (np.isfinite(p_la).all() and np.isfinite(p_ra).all()):
+        return False
+
+    axis = int(ml_axis)
+    pelvis_y = float((p_la[axis] + p_ra[axis]) / 2.0)
+
+    left_present = [str(m).strip() for m in chain_left if str(m).strip() in label_to_idx]
+    right_present = [str(m).strip() for m in chain_right if str(m).strip() in label_to_idx]
+
+    min_vis = int(cfg["chain_swap_min_visible_per_side"])
+    left_y: list[float] = []
+    for m in left_present:
+        mi = label_to_idx[m]
+        q = points[row_f, mi, :]
+        if np.isfinite(q).all():
+            left_y.append(float(q[axis]))
+    right_y: list[float] = []
+    for m in right_present:
+        mi = label_to_idx[m]
+        q = points[row_f, mi, :]
+        if np.isfinite(q).all():
+            right_y.append(float(q[axis]))
+
+    if len(left_y) < min_vis or len(right_y) < min_vis:
+        return False
+
+    left_mean_y = float(np.mean(left_y))
+    right_mean_y = float(np.mean(right_y))
+    y_sep_min = float(cfg["chain_swap_y_separation_min_mm"])
+    if abs(left_mean_y - right_mean_y) < y_sep_min:
+        return False
+
+    off_min = float(cfg["chain_swap_side_offset_min_mm"])
+    left_offset = left_mean_y - pelvis_y
+    right_offset = right_mean_y - pelvis_y
+    if abs(left_offset) < off_min or abs(right_offset) < off_min:
+        return False
+
+    left_actual_sign = int(np.sign(left_offset))
+    right_actual_sign = int(np.sign(right_offset))
+    if left_actual_sign == 0 or right_actual_sign == 0:
+        return False
+
+    expected_left = int(left_ml_sign)
+    expected_right = -int(left_ml_sign)
+    if left_actual_sign != expected_left and right_actual_sign != expected_right:
+        return True
+    return False
+
+
+def _aligned_chain_pairs(
+    chain_left: Sequence[str],
+    chain_right: Sequence[str],
+    label_to_idx: Mapping[str, int],
+) -> list[tuple[str, str]]:
+    """(left, right) pairs in list order where both stems exist in the CSV."""
+    pairs: list[tuple[str, str]] = []
+    for ml, mr in zip(chain_left, chain_right, strict=False):
+        a, b = str(ml).strip(), str(mr).strip()
+        if a in label_to_idx and b in label_to_idx:
+            pairs.append((a, b))
+    return pairs
+
+
+def _log_chain_interval_summary(
+    frames: np.ndarray,
+    start_row: int,
+    end_row: int,
+    chain_name: str,
+    left_y_sign: int,
+    pairs_swapped: Sequence[tuple[str, str]],
+    reason: str,
+) -> dict[str, Any]:
+    """One correction-log row summarizing a full bilateral chain swap interval."""
+    return {
+        "frame": int(frames[start_row]),
+        "marker": f"{chain_name}_chain",
+        "stage": 6,
+        "action": "full_chain_swap_interval",
+        "tier": 3,
+        "confidence": "HIGH",
+        "original_x": "",
+        "original_y": "",
+        "original_z": "",
+        "new_x": "",
+        "new_y": "",
+        "new_z": "",
+        "expected_x": "",
+        "expected_y": "",
+        "expected_z": "",
+        "reason": reason,
+        "interval_end_frame": int(frames[end_row]),
+        "interval_duration_frames": int(end_row - start_row + 1),
+        "markers_swapped": ",".join(f"{a}<->{b}" for a, b in pairs_swapped),
+        "left_y_sign_used": int(left_y_sign),
+    }
+
+
+def apply_full_chain_swap_detection(
+    points: np.ndarray,
+    meta: dict[str, Any],
+    meta_orig: dict[str, Any],
+    bilateral_chains: Mapping[str, tuple[Sequence[str], Sequence[str]]],
+    original_frame_for_sign: int,
+    *,
+    fallback_original_frame_for_sign: int | None,
+    cfg: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
+    """
+    Detect extended left-right chain swaps using lab-Y vs pelvis midline (post-pelvis correction).
+
+    Returns ``(log_entries, interval_summaries, n_intervals, n_frames_affected)``.
+    """
+    if not bilateral_chains:
+        return [], [], 0, 0
+
+    setup = determine_chain_swap_setup(meta_orig)
+    left_y_sign = int(setup["left_ml_sign"])
+    ml_axis = int(setup["ml_axis"])
+    frames: np.ndarray = meta["frames"]
+    n_frames = int(meta["n_frames"])
+
+    log_entries: list[dict[str, Any]] = []
+    interval_summaries: list[dict[str, Any]] = []
+    min_run = int(cfg["chain_swap_min_consecutive_frames"])
+    frames_affected = 0
+
+    l2i: dict[str, int] = meta["label_to_marker_idx"]
+
+    for chain_name, (chain_left, chain_right) in bilateral_chains.items():
+        pairs = _aligned_chain_pairs(chain_left, chain_right, l2i)
+        if not pairs:
+            continue
+
+        flags = np.zeros(n_frames, dtype=bool)
+        for f in range(n_frames):
+            flags[f] = detect_chain_swap_at_frame(
+                points, f, l2i, chain_left, chain_right, ml_axis, left_y_sign, cfg
+            )
+
+        for start_row, end_row in find_consecutive_intervals(flags.tolist(), min_run):
+            for f in range(start_row, end_row + 1):
+                for m_left, m_right in pairs:
+                    il, ir = l2i[m_left], l2i[m_right]
+                    left_pos = points[f, il, :].copy()
+                    right_pos = points[f, ir, :].copy()
+                    points[f, il, :] = right_pos
+                    points[f, ir, :] = left_pos
+            frames_affected += int(end_row - start_row + 1)
+
+            reason = (
+                f"Both chains wrong Y side vs pelvis; interval rows [{start_row},{end_row}] "
+                f"frames [{int(frames[start_row])},{int(frames[end_row])}]"
+            )
+            log_entries.append(
+                _log_chain_interval_summary(
+                    frames, start_row, end_row, chain_name, left_y_sign, pairs, reason
+                )
+            )
+            interval_summaries.append(
+                {
+                    "chain_name": chain_name,
+                    "start_frame": int(frames[start_row]),
+                    "end_frame": int(frames[end_row]),
+                    "duration_frames": int(end_row - start_row + 1),
+                    "left_y_sign_used": int(left_y_sign),
+                }
+            )
+
+    return log_entries, interval_summaries, len(interval_summaries), frames_affected
 
 
 def _is_unlabeled_stem(stem: str) -> bool:
@@ -265,19 +530,44 @@ def _confidence_from_residual_drop(high_mm: float, med_mm: float, best: float, i
     return "LOW"
 
 
+def _envelope_invalidation_reason(
+    p: np.ndarray,
+    centroid: np.ndarray,
+    cfg: Mapping[str, Any],
+    env_info: Mapping[str, Any],
+) -> str:
+    """Return ``envelope_outside`` or ``walking_path_y_outside`` for a flagged envelope violation."""
+    env_r = float(cfg["envelope_radius_mm"])
+    viol_sphere = bool(np.isfinite(centroid).all() and float(np.linalg.norm(p - centroid)) > env_r)
+    y_band = env_info.get("walking_y_band_mm")
+    viol_y = False
+    if y_band is not None and len(y_band) == 2:
+        y_lo, y_hi = float(y_band[0]), float(y_band[1])
+        viol_y = bool(p[1] < y_lo or p[1] > y_hi)
+    if viol_sphere:
+        return "envelope_outside"
+    if viol_y:
+        return "walking_path_y_outside"
+    return "envelope_outside"
+
+
 def apply_envelope_filter(
     points: np.ndarray,
     meta: dict[str, Any],
     marker_tiers: Mapping[str, int],
     body_stems: Sequence[str],
     envelope_outside: np.ndarray,
+    centroids: np.ndarray,
+    env_info: Mapping[str, Any],
     cfg: Mapping[str, Any],
+    invalidated_marker_frames: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     log: list[dict[str, Any]] = []
     label_to_idx: dict[str, int] = meta["label_to_marker_idx"]
     frames: np.ndarray = meta["frames"]
     n_frames = int(meta["n_frames"])
     for f in range(n_frames):
+        c = centroids[f]
         for j, stem in enumerate(body_stems):
             if stem not in label_to_idx:
                 continue
@@ -290,7 +580,18 @@ def apply_envelope_filter(
                 continue
             if j < envelope_outside.shape[1] and envelope_outside[f, j]:
                 prev = p.copy()
+                inv_reason = _envelope_invalidation_reason(p, c, cfg, env_info)
                 points[f, mi, :] = np.nan
+                invalidated_marker_frames.append(
+                    {
+                        "frame": int(frames[f]),
+                        "marker": stem,
+                        "original_position": prev.copy(),
+                        "invalidation_reason": inv_reason,
+                        "invalidation_stage": 1,
+                        "tier": int(tier),
+                    }
+                )
                 log.append(
                     _log_row(
                         int(frames[f]),
@@ -308,6 +609,13 @@ def apply_envelope_filter(
     return log
 
 
+def _tier_priority_sort_key(tier: int) -> tuple[int, int]:
+    """Lower tuple sorts earlier: tier 2, then 3, then 1 (tier-1 markers processed last)."""
+    t = int(tier)
+    group = {2: 0, 3: 1, 1: 2}.get(t, 1)
+    return (group, t)
+
+
 def _log_row(
     frame: int,
     marker: str,
@@ -319,7 +627,17 @@ def _log_row(
     new: np.ndarray,
     expected: np.ndarray,
     reason: str,
+    *,
+    priority: str | int = "",
+    invalidation_reason: str = "",
+    source_unlabeled: str = "",
+    distance_to_expected: str | float = "",
 ) -> dict[str, Any]:
+    dte = (
+        float(distance_to_expected)
+        if isinstance(distance_to_expected, (int, float)) and np.isfinite(float(distance_to_expected))
+        else (str(distance_to_expected) if distance_to_expected != "" else "")
+    )
     return {
         "frame": frame,
         "marker": marker,
@@ -337,6 +655,10 @@ def _log_row(
         "expected_y": float(expected[1]) if np.isfinite(expected[1]) else "",
         "expected_z": float(expected[2]) if np.isfinite(expected[2]) else "",
         "reason": reason,
+        "priority": priority if priority != "" else "",
+        "invalidation_reason": invalidation_reason,
+        "source_unlabeled": source_unlabeled,
+        "distance_to_expected": dte,
     }
 
 
@@ -634,6 +956,7 @@ def apply_single_frame_rejection(
     reference_geometry: Mapping[str, Any],
     cfg: Mapping[str, Any],
     sustained_warnings: list[str],
+    invalidated_marker_frames: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     log: list[dict[str, Any]] = []
     label_to_idx: dict[str, int] = meta["label_to_marker_idx"]
@@ -682,6 +1005,16 @@ def apply_single_frame_rejection(
             if med < thr:
                 prev = p.copy()
                 points[f, mi, :] = np.nan
+                invalidated_marker_frames.append(
+                    {
+                        "frame": int(frames[f]),
+                        "marker": stem,
+                        "original_position": prev.copy(),
+                        "invalidation_reason": "single_frame_outlier",
+                        "invalidation_stage": 4,
+                        "tier": int(tier),
+                    }
+                )
                 log.append(
                     _log_row(
                         int(frames[f]),
@@ -703,7 +1036,9 @@ def apply_single_frame_rejection(
     return log
 
 
-def apply_unlabeled_assignment(
+def try_unlabeled_replacement(
+    entry: Mapping[str, Any],
+    priority: int,
     points: np.ndarray,
     meta: dict[str, Any],
     unlabeled_indices: Sequence[int],
@@ -712,73 +1047,292 @@ def apply_unlabeled_assignment(
     segment_markers_dict: Mapping[str, Sequence[str]],
     reference_geometry: Mapping[str, Any],
     centroids: np.ndarray,
+    consumed_unlabeled_per_frame: dict[int, set[str]],
+    frame_to_row: Mapping[int, int],
+    idx_to_stem: Mapping[int, str],
+    cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Try to fill one missing marker row from an unlabeled column; returns one log dict (always)."""
+    label_to_idx: dict[str, int] = meta["label_to_marker_idx"]
+    frame_col = int(entry["frame"])
+    stem = str(entry["marker"])
+    tier = int(entry.get("tier", marker_tiers.get(stem, 3)))
+    row_f = frame_to_row.get(frame_col)
+    if row_f is None or stem not in label_to_idx:
+        return {
+            "frame": frame_col,
+            "marker": stem,
+            "stage": 5,
+            "action": "no_expected_skip",
+            "tier": tier,
+            "confidence": "LOW",
+            "original_x": "",
+            "original_y": "",
+            "original_z": "",
+            "new_x": "",
+            "new_y": "",
+            "new_z": "",
+            "expected_x": "",
+            "expected_y": "",
+            "expected_z": "",
+            "reason": "missing_frame_row_or_marker",
+            "priority": priority,
+            "invalidation_reason": entry.get("invalidation_reason") if priority == 1 else "",
+            "source_unlabeled": "",
+            "distance_to_expected": "",
+        }
+    mi = label_to_idx[stem]
+    prev = points[row_f, mi, :].copy()
+    if np.isfinite(prev).all():
+        return {
+            "frame": frame_col,
+            "marker": stem,
+            "stage": 5,
+            "action": "no_longer_missing_skip",
+            "tier": tier,
+            "confidence": "LOW",
+            "original_x": float(prev[0]),
+            "original_y": float(prev[1]),
+            "original_z": float(prev[2]),
+            "new_x": float(prev[0]),
+            "new_y": float(prev[1]),
+            "new_z": float(prev[2]),
+            "expected_x": "",
+            "expected_y": "",
+            "expected_z": "",
+            "reason": "marker_already_finite_before_stage5",
+            "priority": priority,
+            "invalidation_reason": entry.get("invalidation_reason") if priority == 1 else "",
+            "source_unlabeled": "",
+            "distance_to_expected": "",
+        }
+
+    exp = compute_expected_for_stem(
+        points,
+        row_f,
+        stem,
+        segment_markers_dict,
+        reference_geometry,
+        label_to_idx,
+        frozenset({stem}),
+    )
+    if exp is None or not np.isfinite(exp).all():
+        return {
+            "frame": frame_col,
+            "marker": stem,
+            "stage": 5,
+            "action": "no_expected_skip",
+            "tier": tier,
+            "confidence": "LOW",
+            "original_x": "",
+            "original_y": "",
+            "original_z": "",
+            "new_x": "",
+            "new_y": "",
+            "new_z": "",
+            "expected_x": float(exp[0]) if exp is not None and np.isfinite(exp[0]) else "",
+            "expected_y": float(exp[1]) if exp is not None and np.isfinite(exp[1]) else "",
+            "expected_z": float(exp[2]) if exp is not None and np.isfinite(exp[2]) else "",
+            "reason": "expected_position_not_computable",
+            "priority": priority,
+            "invalidation_reason": entry.get("invalidation_reason") if priority == 1 else "",
+            "source_unlabeled": "",
+            "distance_to_expected": "",
+        }
+
+    env_r = float(cfg["envelope_radius_mm"])
+    assign_max = float(cfg["assignment_threshold_mm"])
+    c = centroids[row_f]
+    consumed = consumed_unlabeled_per_frame.setdefault(row_f, set())
+
+    candidates: list[tuple[float, int, np.ndarray]] = []
+    for ui in unlabeled_indices:
+        ust = idx_to_stem[int(ui)]
+        if ust in consumed:
+            continue
+        pu = points[row_f, ui, :]
+        if not np.isfinite(pu).all():
+            continue
+        if np.isfinite(c).all():
+            if float(np.linalg.norm(pu - c)) > env_r:
+                continue
+        dist = float(np.linalg.norm(pu - exp))
+        if dist < assign_max:
+            candidates.append((dist, int(ui), pu.copy()))
+
+    inv_reason = str(entry.get("invalidation_reason", "") if priority == 1 else "")
+
+    if not candidates:
+        return {
+            "frame": frame_col,
+            "marker": stem,
+            "stage": 5,
+            "action": "no_candidate",
+            "tier": tier,
+            "confidence": "LOW",
+            "original_x": "",
+            "original_y": "",
+            "original_z": "",
+            "new_x": "",
+            "new_y": "",
+            "new_z": "",
+            "expected_x": float(exp[0]),
+            "expected_y": float(exp[1]),
+            "expected_z": float(exp[2]),
+            "reason": "no_unlabeled_within_envelope_and_threshold",
+            "priority": priority,
+            "invalidation_reason": inv_reason,
+            "source_unlabeled": "",
+            "distance_to_expected": "",
+        }
+
+    candidates.sort(key=lambda x: x[0])
+    best_dist, best_ui, _best_pos = candidates[0]
+    best_name = str(idx_to_stem.get(best_ui, best_ui))
+    donor = points[row_f, best_ui, :].copy()
+    points[row_f, mi, :] = donor
+    points[row_f, best_ui, :] = np.nan
+    consumed.add(best_name)
+
+    if best_dist < 10.0:
+        conf = "HIGH"
+    elif best_dist < 20.0:
+        conf = "MEDIUM"
+    else:
+        conf = "LOW"
+    if len(candidates) == 1 and conf == "MEDIUM":
+        conf = "HIGH"
+
+    return {
+        "frame": frame_col,
+        "marker": stem,
+        "stage": 5,
+        "action": "unlabeled_replacement",
+        "tier": tier,
+        "confidence": conf,
+        "original_x": float(prev[0]) if np.isfinite(prev[0]) else "",
+        "original_y": float(prev[1]) if np.isfinite(prev[1]) else "",
+        "original_z": float(prev[2]) if np.isfinite(prev[2]) else "",
+        "new_x": float(donor[0]),
+        "new_y": float(donor[1]),
+        "new_z": float(donor[2]),
+        "expected_x": float(exp[0]),
+        "expected_y": float(exp[1]),
+        "expected_z": float(exp[2]),
+        "reason": f"from={best_name}",
+        "priority": priority,
+        "invalidation_reason": inv_reason,
+        "source_unlabeled": best_name,
+        "distance_to_expected": float(best_dist),
+    }
+
+
+def apply_unlabeled_assignment_with_priority(
+    points: np.ndarray,
+    meta: dict[str, Any],
+    unlabeled_indices: Sequence[int],
+    unlabeled_stems: Sequence[str],
+    invalidated_marker_frames: Sequence[Mapping[str, Any]],
+    marker_tiers: Mapping[str, int],
+    segment_markers_dict: Mapping[str, Sequence[str]],
+    reference_geometry: Mapping[str, Any],
+    centroids: np.ndarray,
     cfg: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    """
+    Stage 5: assign unlabeled points to missing labeled markers.
+
+    Priority 1: markers invalidated in stages 1 or 4 (sorted tier 2→3→1, then earlier stage).
+    Priority 2: originally missing (NaN) markers not in the invalidation list (tier order).
+    """
     log: list[dict[str, Any]] = []
     label_to_idx: dict[str, int] = meta["label_to_marker_idx"]
     frames: np.ndarray = meta["frames"]
     n_frames = int(meta["n_frames"])
-    env_r = float(cfg["envelope_radius_mm"])
-    assign_max = float(cfg["assignment_threshold_mm"])
-    idx_to_stem = {ui: ust for ui, ust in zip(unlabeled_indices, unlabeled_stems, strict=True)}
+    idx_to_stem = {int(ui): str(ust) for ui, ust in zip(unlabeled_indices, unlabeled_stems, strict=True)}
+    frame_to_row = {int(frames[i]): i for i in range(n_frames)}
+
+    invalidated_set = {(int(e["frame"]), str(e["marker"])) for e in invalidated_marker_frames}
+    priority_1 = sorted(
+        invalidated_marker_frames,
+        key=lambda e: (
+            _tier_priority_sort_key(int(e["tier"])),
+            int(e["invalidation_stage"]),
+            int(e["frame"]),
+            str(e["marker"]),
+        ),
+    )
+
     seg_markers = [
         s
         for s in label_to_idx
         if not _is_unlabeled_stem(s) and not str(s).startswith("OBSTACLE")
     ]
-    by_tier = sorted(seg_markers, key=lambda s: ({2: 0, 3: 1, 1: 2}[marker_tiers.get(s, 3)], s))
-
-    for f in range(n_frames):
-        c = centroids[f]
-        if not np.isfinite(c).all():
-            continue
-        used_ul: set[int] = set()
-        for stem in by_tier:
-            tier = marker_tiers.get(stem, 3)
+    priority_2: list[dict[str, Any]] = []
+    for row_f in range(n_frames):
+        fc = int(frames[row_f])
+        for stem in seg_markers:
+            if stem not in label_to_idx:
+                continue
             mi = label_to_idx[stem]
-            if np.isfinite(points[f, mi, :]).all():
+            if np.isfinite(points[row_f, mi, :]).all():
                 continue
-            exp = compute_expected_for_stem(
-                points, f, stem, segment_markers_dict, reference_geometry, label_to_idx, frozenset({stem})
+            if (fc, stem) in invalidated_set:
+                continue
+            priority_2.append(
+                {
+                    "frame": fc,
+                    "marker": stem,
+                    "tier": int(marker_tiers.get(stem, 3)),
+                }
             )
-            if exp is None or not np.isfinite(exp).all():
-                continue
-            candidates: list[tuple[float, int]] = []
-            for ui in unlabeled_indices:
-                if ui in used_ul:
-                    continue
-                pu = points[f, ui, :]
-                if not np.isfinite(pu).all():
-                    continue
-                if np.linalg.norm(pu - c) > env_r:
-                    continue
-                dist = float(np.linalg.norm(pu - exp))
-                if dist < assign_max:
-                    candidates.append((dist, ui))
-            if not candidates:
-                continue
-            candidates.sort(key=lambda x: x[0])
-            _best_d, best_ui = candidates[0]
-            used_ul.add(best_ui)
-            prev = points[f, mi, :].copy()
-            donor = points[f, best_ui, :].copy()
-            points[f, mi, :] = donor
-            points[f, best_ui, :] = np.nan
-            conf = "HIGH" if len(candidates) == 1 else "MEDIUM"
-            log.append(
-                _log_row(
-                    int(frames[f]),
-                    stem,
-                    5,
-                    "unlabeled_assigned",
-                    tier,
-                    conf,
-                    prev,
-                    points[f, mi, :],
-                    exp,
-                    f"from={idx_to_stem.get(best_ui, best_ui)}",
-                )
+    priority_2.sort(
+        key=lambda e: (_tier_priority_sort_key(int(e["tier"])), int(e["frame"]), str(e["marker"]))
+    )
+
+    consumed_unlabeled_per_frame: dict[int, set[str]] = {}
+
+    for entry in priority_1:
+        log.append(
+            try_unlabeled_replacement(
+                entry,
+                1,
+                points,
+                meta,
+                unlabeled_indices,
+                unlabeled_stems,
+                marker_tiers,
+                segment_markers_dict,
+                reference_geometry,
+                centroids,
+                consumed_unlabeled_per_frame,
+                frame_to_row,
+                idx_to_stem,
+                cfg,
             )
+        )
+
+    for entry in priority_2:
+        row = try_unlabeled_replacement(
+            entry,
+            2,
+            points,
+            meta,
+            unlabeled_indices,
+            unlabeled_stems,
+            marker_tiers,
+            segment_markers_dict,
+            reference_geometry,
+            centroids,
+            consumed_unlabeled_per_frame,
+            frame_to_row,
+            idx_to_stem,
+            cfg,
+        )
+        # Avoid huge logs: priority-2 occluded slots usually lack geometry; skip routine skips.
+        if str(row.get("action", "")) not in ("no_expected_skip", "no_longer_missing_skip"):
+            log.append(row)
+
     return log
 
 
@@ -800,6 +1354,7 @@ def validate_continuity(
         "pelvis_combinatorial_swap",
         "single_frame_outlier_rejection",
         "unlabeled_assigned",
+        "unlabeled_replacement",
     }
     for row in log_entries:
         act = str(row.get("action", ""))
@@ -1064,6 +1619,16 @@ def _count_frames_complete_pelvis(
     return int(c)
 
 
+def _log_priority_int(row: Mapping[str, Any]) -> int:
+    p = row.get("priority", "")
+    if p == "" or p is None:
+        return 0
+    try:
+        return int(p)
+    except (TypeError, ValueError):
+        return 0
+
+
 def compute_quality_metrics(
     *,
     meta: dict[str, Any],
@@ -1081,6 +1646,9 @@ def compute_quality_metrics(
     reference_frame_requested: int | None = None,
     reference_frame_used: int | None = None,
     original_best_frame_source: str | None = None,
+    full_chain_swap_intervals: Sequence[Mapping[str, Any]] | None = None,
+    stage5_5_full_chain_swap_frames_affected: int = 0,
+    invalidated_marker_frames: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     seg_stems = [str(x).strip() for names in segment_markers_dict.values() for x in names]
     seg_stems = list(dict.fromkeys(seg_stems))
@@ -1096,7 +1664,80 @@ def compute_quality_metrics(
     cbs: dict[str, int] = {}
     for row in log_entries:
         act = str(row.get("action", ""))
+        if act == "full_chain_swap_interval":
+            continue
         cbs[act] = cbs.get(act, 0) + 1
+    n_chain_iv = len(list(full_chain_swap_intervals or []))
+    cbs["stage5_5_full_chain_swap_intervals"] = int(n_chain_iv)
+    cbs["stage5_5_full_chain_swap_frames_affected"] = int(stage5_5_full_chain_swap_frames_affected)
+
+    cbs["stage5_priority1_replacements"] = sum(
+        1
+        for row in log_entries
+        if str(row.get("action", "")) == "unlabeled_replacement" and _log_priority_int(row) == 1
+    )
+    cbs["stage5_priority2_replacements"] = sum(
+        1
+        for row in log_entries
+        if str(row.get("action", "")) == "unlabeled_replacement" and _log_priority_int(row) == 2
+    )
+    cbs["stage5_priority1_no_candidate"] = sum(
+        1
+        for row in log_entries
+        if str(row.get("action", "")) == "no_candidate" and _log_priority_int(row) == 1
+    )
+    cbs["stage5_priority2_no_candidate"] = sum(
+        1
+        for row in log_entries
+        if str(row.get("action", "")) == "no_candidate" and _log_priority_int(row) == 2
+    )
+
+    inv_list = [dict(x) for x in (invalidated_marker_frames or [])]
+    total_inv = len(inv_list)
+    recovered_pri1 = 0
+    by_marker_inv: dict[str, int] = {}
+    by_marker_rec: dict[str, int] = {}
+    by_reason_inv: dict[str, int] = {}
+    by_reason_rec: dict[str, int] = {}
+    for e in inv_list:
+        m = str(e.get("marker", ""))
+        rsn = str(e.get("invalidation_reason", ""))
+        by_marker_inv[m] = by_marker_inv.get(m, 0) + 1
+        by_reason_inv[rsn] = by_reason_inv.get(rsn, 0) + 1
+    for e in inv_list:
+        fc = int(e["frame"])
+        m = str(e["marker"])
+        rsn = str(e.get("invalidation_reason", ""))
+        if any(
+            str(r.get("action", "")) == "unlabeled_replacement"
+            and _log_priority_int(r) == 1
+            and int(r.get("frame", -1)) == fc
+            and str(r.get("marker", "")) == m
+            for r in log_entries
+        ):
+            recovered_pri1 += 1
+            by_marker_rec[m] = by_marker_rec.get(m, 0) + 1
+            by_reason_rec[rsn] = by_reason_rec.get(rsn, 0) + 1
+
+    def _rate(num: int, den: int) -> float:
+        return float(100.0 * num / den) if den else 0.0
+
+    recovery_rate_by_marker = {
+        m: _rate(by_marker_rec.get(m, 0), by_marker_inv.get(m, 0))
+        for m in sorted(set(by_marker_inv) | set(by_marker_rec))
+    }
+    recovery_rate_by_reason = {
+        r: _rate(by_reason_rec.get(r, 0), by_reason_inv.get(r, 0))
+        for r in sorted(set(by_reason_inv) | set(by_reason_rec))
+    }
+    invalidation_recovery_summary: dict[str, Any] = {
+        "total_invalidations": int(total_inv),
+        "recovered_via_unlabeled": int(recovered_pri1),
+        "recovery_rate": _rate(recovered_pri1, total_inv),
+        "recovery_rate_by_marker": recovery_rate_by_marker,
+        "recovery_rate_by_invalidation_reason": recovery_rate_by_reason,
+    }
+
     cbt = {1: 0, 2: 0, 3: 0}
     for row in log_entries:
         cbt[int(row.get("tier", 3))] = cbt.get(int(row.get("tier", 3)), 0) + 1
@@ -1108,6 +1749,7 @@ def compute_quality_metrics(
     pelvis_stems = {"LASI", "RASI", "LPSI", "RPSI"}
     trunk_stems = {"C7", "T10", "CLAV", "STRN"}
     com_crit = {m: va.get(m, 0) / max(int(meta["n_frames"]), 1) for m in pelvis_stems | trunk_stems if m in va}
+
     return {
         "trial_name": trial_name,
         "trimmed_only_marker_columns": list(trimmed_only_marker_columns or []),
@@ -1136,6 +1778,8 @@ def compute_quality_metrics(
         "max_residual_per_segment_after": {
             k: float(v) for k, v in m_after.items()
         },
+        "full_chain_swap_intervals": list(full_chain_swap_intervals or []),
+        "invalidation_recovery_summary": invalidation_recovery_summary,
     }
 
 
@@ -1149,6 +1793,7 @@ def correct_markers(
     marker_tiers: Mapping[str, int] | None = None,
     same_segment_swap_pairs: Sequence[tuple[str, str]] | None = None,
     cross_segment_swap_pairs: Sequence[tuple[str, str]] | None = None,
+    bilateral_chains: Mapping[str, tuple[Sequence[str], Sequence[str]]] | None = None,
     pelvis_segment_name: str = "Pelvis",
     verified_segments: Sequence[str] | None = None,
     obstacle_marker_pair: tuple[str, str] | None = None,
@@ -1162,8 +1807,8 @@ def correct_markers(
     ``bestframe_sidecar_path(original_csv_path)`` is used (same convention as
     :func:`marker_label.trial_trim.load_best_frame_1based` / pipeline ``*.csv.bestframe``).
 
-    See module docstring for the staged pipeline (envelope → pelvis → swaps → rejection →
-    unlabeled assignment → continuity).
+    See module docstring for the staged pipeline (envelope → pelvis → other swaps →
+    rejection → unlabeled assignment → continuity).
     """
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     seg_dict = {str(k): [str(x).strip() for x in v] for k, v in segment_markers_dict.items()}
@@ -1242,7 +1887,11 @@ def correct_markers(
         if body_marker_names is not None
         else sorted({str(x).strip() for names in seg_dict.values() for x in names})
     )
-    centroids, envelope_outside, _env_info = compute_subject_envelope(
+    log_all: list[dict[str, Any]] = []
+    sustained: list[str] = []
+    invalidated_marker_frames: list[dict[str, Any]] = []
+
+    centroids, envelope_outside, env_info = compute_subject_envelope(
         meta_work,
         body_union,
         obstacle_marker_pair,
@@ -1251,11 +1900,18 @@ def correct_markers(
         walking_path_y_margin_mm=float(cfg["walking_path_y_margin_mm"]),
     )
 
-    log_all: list[dict[str, Any]] = []
-    sustained: list[str] = []
-
     log_all.extend(
-        apply_envelope_filter(points, meta_work, marker_tier_map, body_union, envelope_outside, cfg)
+        apply_envelope_filter(
+            points,
+            meta_work,
+            marker_tier_map,
+            body_union,
+            envelope_outside,
+            centroids,
+            env_info,
+            cfg,
+            invalidated_marker_frames,
+        )
     )
 
     pelvis_four = _pelvis_four_markers(seg_dict, pelvis_segment_name)
@@ -1276,6 +1932,29 @@ def correct_markers(
             pelvis_segment_name,
         )
 
+    if bilateral_chains is not None:
+        chains_resolved: dict[str, tuple[list[str], list[str]]] = {
+            str(k): ([str(x).strip() for x in v[0]], [str(x).strip() for x in v[1]])
+            for k, v in bilateral_chains.items()
+        }
+    else:
+        chains_resolved = {k: (list(v[0]), list(v[1])) for k, v in DEFAULT_BILATERAL_CHAINS.items()}
+
+    chain_interval_meta: list[dict[str, Any]] = []
+    chain_frames_aff = 0
+    if chains_resolved:
+        fb_sign = int(ref_frame_used) if int(ref_frame_used) != int(obf_requested) else None
+        clogs, chain_interval_meta, _n_iv, chain_frames_aff = apply_full_chain_swap_detection(
+            points,
+            meta_work,
+            meta_orig,
+            chains_resolved,
+            int(obf_requested),
+            fallback_original_frame_for_sign=fb_sign,
+            cfg=cfg,
+        )
+        log_all.extend(clogs)
+
     s_pairs = tuple(same_segment_swap_pairs) if same_segment_swap_pairs is not None else DEFAULT_SAME_SEGMENT_SWAP_PAIRS
     c_pairs = tuple(cross_segment_swap_pairs) if cross_segment_swap_pairs is not None else DEFAULT_CROSS_SEGMENT_SWAP_PAIRS
     log_all.extend(
@@ -1288,7 +1967,14 @@ def correct_markers(
     )
     log_all.extend(
         apply_single_frame_rejection(
-            points, meta_work, marker_tier_map, seg_dict, ref_geom, cfg, sustained
+            points,
+            meta_work,
+            marker_tier_map,
+            seg_dict,
+            ref_geom,
+            cfg,
+            sustained,
+            invalidated_marker_frames,
         )
     )
 
@@ -1299,11 +1985,12 @@ def correct_markers(
             unlabeled_idx.append(si)
             unlabeled_stem.append(stem)
     log_all.extend(
-        apply_unlabeled_assignment(
+        apply_unlabeled_assignment_with_priority(
             points,
             meta_work,
             unlabeled_idx,
             unlabeled_stem,
+            invalidated_marker_frames,
             marker_tier_map,
             seg_dict,
             ref_geom,
@@ -1335,6 +2022,9 @@ def correct_markers(
         reference_frame_requested=obf_requested,
         reference_frame_used=int(ref_frame_used),
         original_best_frame_source=obf_source,
+        full_chain_swap_intervals=chain_interval_meta,
+        stage5_5_full_chain_swap_frames_affected=int(chain_frames_aff),
+        invalidated_marker_frames=invalidated_marker_frames,
     )
     save_quality_metrics(qm, out_p.with_suffix(out_p.suffix + ".quality.json"))
     try:
@@ -1400,10 +2090,33 @@ def main() -> None:
         default=None,
         help="Obstacle markers for walking-path Y filter",
     )
+    parser.add_argument(
+        "--exclude-same-segment-swap",
+        nargs=2,
+        metavar=("M1", "M2"),
+        action="append",
+        default=None,
+        help=(
+            "Exclude one marker pair from the built-in same-segment swap list (repeatable). "
+            "Example: --exclude-same-segment-swap T10 STRN"
+        ),
+    )
+    parser.add_argument(
+        "--no-same-segment-swap",
+        action="store_true",
+        help="Disable all default same-segment pairwise swaps (overrides --exclude-same-segment-swap).",
+    )
     args = parser.parse_args()
     seg = segment_markers_dict_for_trim_preset(args.preset)
     pair = tuple(args.obstacle_pair) if args.obstacle_pair else None
     cfg_cli = {"reference_frame_search_radius": int(args.reference_frame_search_radius)}
+    if args.no_same_segment_swap:
+        s_pairs: tuple[tuple[str, str], ...] | None = ()
+    else:
+        s_pairs = filter_same_segment_swap_pairs(
+            DEFAULT_SAME_SEGMENT_SWAP_PAIRS,
+            [tuple(x) for x in (args.exclude_same_segment_swap or [])],
+        )
     try:
         res = correct_markers(
             args.trimmed_csv,
@@ -1413,6 +2126,7 @@ def main() -> None:
             seg,
             obstacle_marker_pair=pair,
             pelvis_segment_name="Pelvis",
+            same_segment_swap_pairs=s_pairs,
             config=cfg_cli,
         )
     except Exception as e:

@@ -5,7 +5,8 @@ Preserves original ``frame`` and ``time`` values (no renumbering). Best-frame si
 as ``marker_label.pipeline`` and ``qc_viewer``: ``<csv>.csv.bestframe`` with a 1-based frame index.
 
 CLI segment presets (see :func:`segment_markers_dict_for_trim_preset`): ``default`` is thigh/shank/foot
-only (no pelvis/ASIS). ``lower-body`` adds optional pelvis QC (LASI/RASI/LTHI triad + leg chains, no PSIS).
+only (no pelvis segment; thighs use ASI/THI/KNE). ``lower-body`` adds optional pelvis QC
+(LASI/RASI/LTHI triad + leg chains, no PSIS).
 ``full-body`` restores the previous default: ``segments.SEGMENTS`` with ≥3 markers per entry. ``legs-feet``
 is an alias of ``default``.
 """
@@ -47,14 +48,15 @@ LOWER_BODY_TRIM_PRESET_SEGMENTS: dict[str, list[str]] = {
     "R_Foot": ["RANK", "RHEE", "RTOE", "RANK"],
 }
 
-# Thigh chains start at LTHI/RTHI (no ASIS) so pelvis swaps / mislabels do not affect trim QC.
+# Legs-feet preset keeps only lower-limb chains, but thigh uses ASI->THI->KNE for
+# anatomically rigid thigh geometry in gait QC.
 LEGS_FEET_TRIM_PRESET_SEGMENTS: dict[str, list[str]] = {
-    "L_Thigh": ["LTHI", "LKNE", "LTIB"],
+    "L_Thigh": ["LASI", "LTHI", "LKNE"],
     "L_Shank": ["LKNE", "LTIB", "LANK"],
-    "L_Foot": ["LANK", "LHEE", "LTOE", "LANK"],
-    "R_Thigh": ["RTHI", "RKNE", "RTIB"],
+    "L_Foot": ["LANK", "LHEE", "LTOE"],
+    "R_Thigh": ["RASI", "RTHI", "RKNE"],
     "R_Shank": ["RKNE", "RTIB", "RANK"],
-    "R_Foot": ["RANK", "RHEE", "RTOE", "RANK"],
+    "R_Foot": ["RANK", "RHEE", "RTOE"],
 }
 
 
@@ -84,8 +86,8 @@ def segment_markers_dict_for_trim_preset(preset: str) -> dict[str, list[str]]:
     Parameters
     ----------
     preset
-        ``"default"`` / ``"legs-feet"`` — thighs, shanks, feet only (LTHI… / RTHI… chains); no ASIS/PSIS
-        so pelvis swaps or mislabels do not affect trim QC.
+        ``"default"`` / ``"legs-feet"`` — thighs/shanks/feet only (no pelvis segment). Thigh chains use
+        ``LASI->LTHI->LKNE`` and ``RASI->RTHI->RKNE`` for anatomical rigidity.
 
         ``"lower-body"`` — optional pelvis + leg QC: LASI/RASI/LTHI triad plus the usual leg chains
         (no PSIS on the pelvis triad).
@@ -959,7 +961,7 @@ def main() -> None:
         choices=sorted(TRIM_SEGMENT_PRESET_CHOICES),
         default="default",
         help=(
-            "Segment set: 'default' / 'legs-feet' = thigh/shank/foot only (no pelvis/ASIS); "
+            "Segment set: 'default' / 'legs-feet' = thigh/shank/foot only (no pelvis segment); "
             "'lower-body' = optional pelvis QC (LASI/RASI/LTHI + legs/feet, no PSIS); "
             "'full-body' = SEGMENTS with ≥3 markers (old default). Ignored if --segments-json is set."
         ),

@@ -5,6 +5,11 @@ Single-pass: trusted frame range around one best frame (Kabsch residuals + visib
 Two-pass: trim each labeling pass, pick a switch frame, merge rows so frames before switch use pass 1
 and frames from switch onward use pass 2.
 
+When ``obstacle_marker_pair`` is provided, the first stage can robustify obstacle endpoints:
+best-frame obstacle pair must be finite (hard fail), one-sided missing values are reconstructed,
+NaN gaps are interpolated, and per-point XYZ can be screened to NaN if point-Y is outside the
+frame-wise obstacle Y range.
+
 **Trim vs combine:** ``segment_markers_dict`` (CLI ``--preset`` / JSON) lists markers that must exist in the CSV.
 Trusted-range trimming, overlap switch scoring, and envelope (unless ``body_marker_names`` is set) use a separate
 **trim-QC** segment set: config ``trim_qc_preset`` (default ``"legs-feet"``) or ``trim_qc_preset: None`` to use the
@@ -47,6 +52,7 @@ from .trial_trim import (
     segment_markers_dict_for_trim_preset,
     _segment_residual_threshold_mm,
 )
+from .walking_setup import determine_setup, find_lead_foot_crossing
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "visibility_ratio_marker_subset": "legs-feet",
     # Preset name for trim-only QC (legs-feet = thigh–shank–foot chains). None = use segment_markers_dict.
     "trim_qc_preset": "legs-feet",
+    # First-stage obstacle prefilter:
+    # 1) require finite obstacle pair at best frame (hard fail if missing),
+    # 2) repair missing pair values and fill gaps,
+    # 3) optionally set per-point XYZ to NaN when point Y is outside obstacle Y range in that frame.
+    "obstacle_prefilter_enabled": True,
+    "obstacle_prefilter_gap_fill_max_frames": 150,
+    "obstacle_prefilter_fill_with_best_if_unresolved": True,
+    "point_y_screening_enabled": True,
+    "point_y_screening_margin_mm": 0.0,
+    "point_y_screening_exclude_obstacles": True,
 }
 
 
@@ -90,6 +106,196 @@ def _markers_union(segment_markers_dict: Mapping[str, Sequence[str]]) -> list[st
                 seen.add(st)
                 out.append(st)
     return out
+
+
+def _meta_markers_dict(meta: dict[str, Any]) -> dict[str, np.ndarray]:
+    """Stem -> (n_frames, 3) trajectory view from parsed metadata."""
+    points: np.ndarray = meta["points"]
+    stems: list[str] = meta["all_stems"]
+    return {str(st): points[:, i, :] for i, st in enumerate(stems)}
+
+
+def _ensure_finite_obstacle_pair_at_best(
+    meta: dict[str, Any],
+    best_frame: int,
+    obstacle_pair: tuple[str, str],
+) -> tuple[int, int, np.ndarray, np.ndarray]:
+    """Return obstacle indices + best-frame XYZ, or raise if either is missing/non-finite."""
+    a, b = str(obstacle_pair[0]).strip(), str(obstacle_pair[1]).strip()
+    l2i: dict[str, int] = meta["label_to_marker_idx"]
+    if a not in l2i or b not in l2i:
+        raise ValueError(
+            f"Obstacle pair markers not found in CSV columns: {a!r}, {b!r}"
+        )
+    row = _best_row_idx(meta["frames"], int(best_frame))
+    pts: np.ndarray = meta["points"]
+    ia, ib = l2i[a], l2i[b]
+    pa = pts[row, ia, :].copy()
+    pb = pts[row, ib, :].copy()
+    if not (np.isfinite(pa).all() and np.isfinite(pb).all()):
+        raise ValueError(
+            "Best frame must contain finite obstacle pair coordinates, but got missing/non-finite values: "
+            f"frame={best_frame}, pair=({a},{b}), {a}={pa.tolist()}, {b}={pb.tolist()}"
+        )
+    return ia, ib, pa, pb
+
+
+def _interpolate_nan_rows(
+    xyzt: np.ndarray,
+    *,
+    max_gap: int,
+) -> tuple[np.ndarray, int]:
+    """
+    Linear interpolation for NaN rows in ``(n_frames, 3)``.
+
+    Fills only gaps with length <= ``max_gap`` and finite anchors on both sides.
+    Returns (filled_array, n_rows_filled).
+    """
+    arr = np.array(xyzt, copy=True)
+    n = int(arr.shape[0])
+    filled = 0
+    i = 0
+    while i < n:
+        if np.isfinite(arr[i]).all():
+            i += 1
+            continue
+        s = i
+        while i < n and not np.isfinite(arr[i]).all():
+            i += 1
+        e = i - 1
+        gap = e - s + 1
+        left = s - 1
+        right = i
+        if (
+            gap <= int(max_gap)
+            and left >= 0
+            and right < n
+            and np.isfinite(arr[left]).all()
+            and np.isfinite(arr[right]).all()
+        ):
+            for k in range(gap):
+                t = float(k + 1) / float(gap + 1)
+                arr[s + k] = (1.0 - t) * arr[left] + t * arr[right]
+                filled += 1
+    return arr, int(filled)
+
+
+def _apply_obstacle_prefilter(
+    meta: dict[str, Any],
+    best_frame: int,
+    obstacle_pair: tuple[str, str],
+    cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+    """
+    First-stage obstacle prefilter on one pass metadata (in-place on ``meta['points']``):
+
+    - Validate finite obstacle pair at best frame (hard fail).
+    - Reconstruct missing obstacle points from the best-frame pair vector and visible endpoint.
+    - Gap-fill unresolved obstacle NaN runs by interpolation (<= max gap).
+    - Optional fallback: unresolved rows copy best-frame obstacle coordinates.
+    - Per-frame Y-range screening: set point XYZ to NaN when point Y is outside obstacle pair Y range.
+    """
+    pts: np.ndarray = meta["points"]
+    n = int(meta["n_frames"])
+    ia, ib, p_best_a, p_best_b = _ensure_finite_obstacle_pair_at_best(
+        meta, int(best_frame), obstacle_pair
+    )
+    a_name, b_name = str(obstacle_pair[0]).strip(), str(obstacle_pair[1]).strip()
+    delta_ab = p_best_b - p_best_a
+    delta_ba = -delta_ab
+
+    reconstructed_rows = 0
+    for f in range(n):
+        pa = pts[f, ia, :]
+        pb = pts[f, ib, :]
+        a_ok = bool(np.isfinite(pa).all())
+        b_ok = bool(np.isfinite(pb).all())
+        if a_ok and b_ok:
+            continue
+        if a_ok and not b_ok:
+            pts[f, ib, :] = pa + delta_ab
+            reconstructed_rows += 1
+        elif b_ok and not a_ok:
+            pts[f, ia, :] = pb + delta_ba
+            reconstructed_rows += 1
+
+    a_filled, n_fill_a = _interpolate_nan_rows(
+        pts[:, ia, :], max_gap=int(cfg["obstacle_prefilter_gap_fill_max_frames"])
+    )
+    b_filled, n_fill_b = _interpolate_nan_rows(
+        pts[:, ib, :], max_gap=int(cfg["obstacle_prefilter_gap_fill_max_frames"])
+    )
+    pts[:, ia, :] = a_filled
+    pts[:, ib, :] = b_filled
+
+    best_fallback_rows = 0
+    if bool(cfg["obstacle_prefilter_fill_with_best_if_unresolved"]):
+        for f in range(n):
+            a_ok = bool(np.isfinite(pts[f, ia, :]).all())
+            b_ok = bool(np.isfinite(pts[f, ib, :]).all())
+            if a_ok and b_ok:
+                continue
+            pts[f, ia, :] = p_best_a
+            pts[f, ib, :] = p_best_b
+            best_fallback_rows += 1
+
+    y_margin = float(cfg["point_y_screening_margin_mm"])
+    exclude_obs = bool(cfg["point_y_screening_exclude_obstacles"])
+    screened_points = 0
+    y_lo_global = float("nan")
+    y_hi_global = float("nan")
+    if bool(cfg["point_y_screening_enabled"]):
+        obs_idx = {ia, ib} if exclude_obs else set()
+        ys = pts[:, [ia, ib], 1].reshape(-1)
+        ys = ys[np.isfinite(ys)]
+        if ys.size > 0:
+            y_lo_global = float(np.min(ys) - y_margin)
+            y_hi_global = float(np.max(ys) + y_margin)
+        else:
+            y_lo_global = float("-inf")
+            y_hi_global = float("inf")
+        for f in range(n):
+            for mi in range(int(pts.shape[1])):
+                if mi in obs_idx:
+                    continue
+                p = pts[f, mi, :]
+                if not np.isfinite(p).all():
+                    continue
+                py = float(p[1])
+                if py < y_lo_global or py > y_hi_global:
+                    pts[f, mi, :] = np.nan
+                    screened_points += 1
+
+    return {
+        "obstacle_pair": [a_name, b_name],
+        "best_frame": int(best_frame),
+        "reconstructed_rows_one_sided": int(reconstructed_rows),
+        "gap_filled_rows_obstacle_a": int(n_fill_a),
+        "gap_filled_rows_obstacle_b": int(n_fill_b),
+        "best_fallback_rows": int(best_fallback_rows),
+        "point_y_screened_xyz_rows": int(screened_points),
+        "point_y_screening_margin_mm": float(y_margin),
+        "point_y_screening_range_global_mm": [
+            float(y_lo_global) if np.isfinite(y_lo_global) else None,
+            float(y_hi_global) if np.isfinite(y_hi_global) else None,
+        ],
+    }
+
+
+def _sync_data_rows_from_points(meta: dict[str, Any]) -> None:
+    """Mirror ``meta['points']`` into ``meta['data_rows']`` for CSV writing."""
+    stem_to_triplet: dict[str, tuple[int, int, int]] = meta["stem_to_col_triplet"]
+    stems: list[str] = meta["all_stems"]
+    points: np.ndarray = meta["points"]
+    rows: list[list[str]] = meta["data_rows"]
+    n_frames = int(meta["n_frames"])
+    for r in range(n_frames):
+        row = rows[r]
+        for si, stem in enumerate(stems):
+            ix, iy, iz = stem_to_triplet[stem]
+            for k, j in enumerate((ix, iy, iz)):
+                v = points[r, si, k]
+                row[j] = "" if not np.isfinite(v) else str(float(v))
 
 
 def _validate_two_pass_frames_time(meta1: dict[str, Any], meta2: dict[str, Any]) -> None:
@@ -304,6 +510,7 @@ def compute_diagnostics_with_envelope(
 
         seg_residual: dict[str, float] = {}
         seg_bad: dict[str, bool] = {}
+        seg_state: dict[str, str] = {}
         for seg_name, ref in reference_geometry.items():
             names_ref: list[str] = ref["marker_names"]
             P_loc = ref["P_local"]
@@ -321,7 +528,9 @@ def compute_diagnostics_with_envelope(
                 rows_loc.append(np.asarray(pl, dtype=np.float64))
                 rows_glob.append(np.asarray(g, dtype=np.float64))
             if len(rows_loc) < 3:
-                max_err = np.inf
+                max_err = float("nan")
+                seg_state[seg_name] = "indeterminate"
+                seg_bad[seg_name] = False
             else:
                 a_loc = np.stack(rows_loc, axis=0)
                 a_glob = np.stack(rows_glob, axis=0)
@@ -329,15 +538,19 @@ def compute_diagnostics_with_envelope(
                 pred = a_loc @ r.T + t
                 err = np.linalg.norm(a_glob - pred, axis=1)
                 max_err = float(np.max(err))
+                thr = seg_thresholds[seg_name]
+                is_bad = max_err > thr
+                seg_bad[seg_name] = is_bad
+                seg_state[seg_name] = "bad" if is_bad else "ok"
             seg_residual[seg_name] = max_err
-            thr = seg_thresholds[seg_name]
-            seg_bad[seg_name] = max_err > thr
 
         bad_residual = any(seg_bad.values())
         bad_vis = visible_ratio < float(visible_ratio_threshold)
         is_bad = bad_residual or bad_vis or bad_envelope
 
-        max_res = max(seg_residual.values()) if seg_residual else np.inf
+        finite_residuals = [v for v in seg_residual.values() if np.isfinite(v)]
+        max_res = max(finite_residuals) if finite_residuals else float("nan")
+        indeterminate_count = int(sum(1 for s in seg_state.values() if s == "indeterminate"))
 
         diagnostics.append(
             {
@@ -345,7 +558,9 @@ def compute_diagnostics_with_envelope(
                 "frame_row": f,
                 "segment_residual_mm": seg_residual,
                 "segment_bad_residual": seg_bad,
-                "max_residual_mm": float(max_res) if np.isfinite(max_res) else float("inf"),
+                "segment_state": seg_state,
+                "indeterminate_segment_count": indeterminate_count,
+                "max_residual_mm": float(max_res) if np.isfinite(max_res) else float("nan"),
                 "visible_count": visible_count,
                 "visible_ratio": visible_ratio,
                 "envelope_outside_count": env_count,
@@ -428,15 +643,14 @@ def _write_combined_csv(
     meta_secondary: dict[str, Any],
     trim_start_row: int,
     trim_end_row: int,
-    switch_frame: int | None,
+    pass_selection: Sequence[int] | None,
     two_pass: bool,
     output_csv_path: str | Path,
 ) -> None:
-    """Rows ``[trim_start_row, trim_end_row)``; marker triplets from pass1 or pass2 by switch_frame."""
+    """Rows ``[trim_start_row, trim_end_row)``; marker triplets from pass1 or pass2 by per-frame selection."""
     out = Path(output_csv_path)
     rows1 = meta_primary["data_rows"]
     rows2 = meta_secondary["data_rows"] if two_pass else rows1
-    frames_arr: np.ndarray = meta_primary["frames"]
     header_line = meta_primary["original_header_line"]
     stem_to_triplet: dict[str, tuple[int, int, int]] = meta_primary["stem_to_col_triplet"]
     all_stems: list[str] = meta_primary["all_stems"]
@@ -447,8 +661,13 @@ def _write_combined_csv(
         for row_i in range(trim_start_row, trim_end_row):
             r1 = list(rows1[row_i])
             r2 = list(rows2[row_i])
-            fv = int(frames_arr[row_i])
-            use_p2 = two_pass and switch_frame is not None and fv >= int(switch_frame)
+            rel_i = row_i - trim_start_row
+            chosen = (
+                int(pass_selection[rel_i])
+                if (two_pass and pass_selection is not None and rel_i < len(pass_selection))
+                else 0
+            )
+            use_p2 = two_pass and chosen == 1
             src = r2 if use_p2 else r1
             out_row = list(r1)
             for stem in all_stems:
@@ -466,6 +685,7 @@ def _save_trim_log(
     t1: tuple[int, int],
     t2: tuple[int, int] | None,
     switch_frame: int | None,
+    pass_selection: Sequence[int] | None,
     two_pass: bool,
 ) -> None:
     p = Path(path)
@@ -491,7 +711,9 @@ def _save_trim_log(
             if not two_pass:
                 pu = 1
             else:
-                pu = 2 if (switch_frame is not None and fr >= int(switch_frame)) else 1
+                pu = 1
+                if pass_selection is not None and i < len(pass_selection):
+                    pu = int(pass_selection[i]) + 1
             is_sw = two_pass and switch_frame is not None and fr == int(switch_frame)
             w.writerow([fr, tm, int(in1), int(in2), pu, int(is_sw)])
 
@@ -633,6 +855,28 @@ def trim_and_combine(
         paths = [paths[int(i)] for i in order]
         best_frames = [best_frames[int(i)] for i in order]
 
+    prefilter_stats: list[dict[str, Any]] = []
+    if bool(cfg.get("obstacle_prefilter_enabled", True)) and obstacle_marker_pair is not None:
+        for pi, meta in enumerate(metas):
+            pre_s = _apply_obstacle_prefilter(
+                meta,
+                int(best_frames[pi]),
+                obstacle_marker_pair,
+                cfg,
+            )
+            _sync_data_rows_from_points(meta)
+            prefilter_stats.append({"pass_index": int(pi + 1), **pre_s})
+    else:
+        for pi in range(len(metas)):
+            prefilter_stats.append(
+                {
+                    "pass_index": int(pi + 1),
+                    "obstacle_pair": list(obstacle_marker_pair) if obstacle_marker_pair else None,
+                    "best_frame": int(best_frames[pi]),
+                    "prefilter_skipped": True,
+                }
+            )
+
     qc_seg = _resolve_trim_qc_segment_dict(cfg, segment_markers_dict)
     for seg, names in qc_seg.items():
         if len(names) < 3:
@@ -712,38 +956,51 @@ def trim_and_combine(
 
     frames0 = metas[0]["frames"]
     warnings_list: list[str] = []
+    setup_info: dict[str, Any] | None = None
+    crossing_frame: int | None = None
+    lead_foot_side: str | None = None
+    pass_positions: list[str] | None = None
+    pass_selection_rows: list[int] | None = None
+    overlap_len = 0
+    gap_len = 0
 
     if not two_pass:
         trim_start_row, trim_end_row = trusted_row_spans[0]
         switch_frame: int | None = None
         switch_type = None
-        t1_frames = _trusted_range_frames(frames0, trim_start_row, trim_end_row)
-        t2_frames = None
         out_bf = int(best_frames[0])
         meta_secondary = metas[0]
+        pass_selection_rows = [0] * max(0, trim_end_row - trim_start_row)
     else:
+        if obstacle_marker_pair is None:
+            raise ValueError(
+                "Two-pass mode requires obstacle_marker_pair for setup detection and crossing-based pass selection."
+            )
+        setup_info = determine_setup(
+            _meta_markers_dict(metas[0]),
+            obstacle_pair=obstacle_marker_pair,
+            warnings_list=warnings_list,
+        )
+        crossing_frame, lead_foot_side = find_lead_foot_crossing(
+            _meta_markers_dict(metas[0]),
+            walking_axis=int(setup_info["walking_axis"]),
+            walking_direction=int(setup_info["walking_direction"]),
+            obstacle_pos=float(setup_info["obstacle_pos"]),
+        )
+
         (t1s_row, t1e_row), (t2s_row, t2e_row) = trusted_row_spans
         t1_start, t1_end = _trusted_range_frames(frames0, t1s_row, t1e_row)
         t2_start, t2_end = _trusted_range_frames(frames0, t2s_row, t2e_row)
-        trim_start_row = t1s_row
-        trim_end_row = t2e_row
+        trim_start_f = min(t1_start, t2_start)
+        trim_end_f = max(t1_end, t2_end)
+        trim_start_row = _best_row_idx(frames0, trim_start_f)
+        trim_end_row = _best_row_idx(frames0, trim_end_f - 1) + 1
         bf1, bf2 = int(best_frames[0]), int(best_frames[1])
 
-        overlap_len = 0
-        gap_len = 0
         if t1_end > t2_start:
             switch_type = "overlap"
             overlap_start = max(t1_start, t2_start)
             overlap_end_excl = min(t1_end, t2_end)
-            switch_frame = _find_switch_overlap(
-                all_diag[0],
-                all_diag[1],
-                overlap_start,
-                overlap_end_excl,
-                frames0,
-                bf1,
-                bf2,
-            )
             overlap_len = max(0, overlap_end_excl - overlap_start)
         else:
             switch_type = "gap"
@@ -754,16 +1011,47 @@ def trim_and_combine(
                 msg = f"Gap length {gap_len} exceeds gap_warning_threshold={cfg['gap_warning_threshold']}"
                 warnings.warn(msg, UserWarning, stacklevel=2)
                 warnings_list.append(msg)
-            switch_frame = _find_switch_gap(bf1, bf2, gap_start, gap_end)
 
-        trim_start_f = int(frames0[trim_start_row])
-        trim_end_f = int(frames0[trim_end_row - 1]) + 1
-        if not (trim_start_f <= switch_frame < trim_end_f):
-            raise ValueError(
-                f"switch_frame {switch_frame} not in trimmed half-open range "
-                f"[{trim_start_f}, {trim_end_f})"
+        pass_positions = [
+            ("before" if int(bf) < int(crossing_frame) else "after") for bf in (bf1, bf2)
+        ]
+        if pass_positions[0] == pass_positions[1]:
+            warnings_list.append(
+                f"Both best frames on '{pass_positions[0]}' side of crossing "
+                f"(crossing at frame {crossing_frame}). Falling back to closest-bf preference."
             )
-        out_bf = int(switch_frame)
+
+        pass_selection_rows = []
+        for row_i in range(trim_start_row, trim_end_row):
+            f = int(frames0[row_i])
+            in_pass1 = t1_start <= f < t1_end
+            in_pass2 = t2_start <= f < t2_end
+            f_pos = "before" if f < int(crossing_frame) else "after"
+            on_side = [i for i in range(2) if pass_positions[i] == f_pos]
+            if len(on_side) == 1:
+                preferred = int(on_side[0])
+            else:
+                preferred = 0 if abs(f - bf1) <= abs(f - bf2) else 1
+
+            if in_pass1 and in_pass2:
+                chosen = preferred
+            elif in_pass1:
+                chosen = 0
+            elif in_pass2:
+                chosen = 1
+            else:
+                chosen = preferred
+            pass_selection_rows.append(int(chosen))
+
+        switch_frame = None
+        if not (trim_start_f <= int(crossing_frame) < trim_end_f):
+            warnings_list.append(
+                f"crossing_frame {crossing_frame} outside trimmed range [{trim_start_f}, {trim_end_f}); "
+                "using closest in-range frame as output best frame."
+            )
+            out_bf = int(max(trim_start_f, min(trim_end_f - 1, int(crossing_frame))))
+        else:
+            out_bf = int(crossing_frame)
         meta_secondary = metas[1]
 
     trim_len = trim_end_row - trim_start_row
@@ -777,7 +1065,7 @@ def trim_and_combine(
         meta_secondary,
         trim_start_row,
         trim_end_row,
-        switch_frame,
+        pass_selection_rows,
         two_pass,
         output_csv_path,
     )
@@ -803,6 +1091,7 @@ def trim_and_combine(
         t1f,
         t2f,
         switch_frame,
+        pass_selection_rows,
         two_pass,
     )
 
@@ -816,7 +1105,7 @@ def trim_and_combine(
         "trim_start": trim_start_f,
         "trim_end": trim_end_f,
         "trimmed_n_frames": int(trim_len),
-        "trusted_ranges": {
+        "trusted_ranges_per_pass": {
             "pass1": list(t1f),
             **({"pass2": list(t2f)} if two_pass and t2f is not None else {}),
         },
@@ -824,12 +1113,65 @@ def trim_and_combine(
         "switch_type": switch_type,
         "warnings": warnings_list,
         "envelope_info": env_info_last,
+        "obstacle_prefilter": prefilter_stats,
+        "walking_setup": (
+            {
+                "walking_axis": "X" if int(setup_info["walking_axis"]) == 0 else "Y",
+                "walking_direction": "+" if int(setup_info["walking_direction"]) > 0 else "-",
+                "ml_axis": "X" if int(setup_info["ml_axis"]) == 0 else "Y",
+                "left_ml_sign": "+" if int(setup_info["left_ml_sign"]) > 0 else "-",
+                "obstacle_position_on_axis": float(setup_info["obstacle_pos"]),
+            }
+            if setup_info is not None
+            else None
+        ),
+        "crossing_detection": (
+            {
+                "lead_foot_crossing_frame": int(crossing_frame),
+                "lead_foot_side": str(lead_foot_side),
+            }
+            if crossing_frame is not None and lead_foot_side is not None
+            else None
+        ),
+        "pass_position_relative_to_crossing": (
+            {
+                "pass1": str(pass_positions[0]),
+                "pass2": str(pass_positions[1]),
+            }
+            if pass_positions is not None
+            else None
+        ),
+        "indeterminate_segments_per_pass": {
+            f"pass{i + 1}": {
+                "frames_with_indeterminate": int(
+                    sum(1 for d in diag_pass if int(d.get("indeterminate_segment_count", 0)) > 0)
+                ),
+                "total_indeterminate_segments": int(
+                    sum(int(d.get("indeterminate_segment_count", 0)) for d in diag_pass)
+                ),
+            }
+            for i, diag_pass in enumerate(all_diag)
+        },
     }
     if two_pass:
         quality["overlap_length"] = int(overlap_len)
         quality["gap_length"] = int(gap_len)
-        quality["frames_from_pass1"] = int(switch_frame - trim_start_f) if switch_frame is not None else 0
-        quality["frames_from_pass2"] = int(trim_end_f - switch_frame) if switch_frame is not None else 0
+        if pass_selection_rows is not None:
+            n_p2 = int(sum(1 for x in pass_selection_rows if int(x) == 1))
+            n_p1 = int(len(pass_selection_rows) - n_p2)
+        else:
+            n_p1 = n_p2 = 0
+        quality["pass_selection_summary"] = {
+            "frames_from_pass1": int(n_p1),
+            "frames_from_pass2": int(n_p2),
+        }
+        gap_zone = 0
+        for f in range(trim_start_f, trim_end_f):
+            in1 = t1f[0] <= f < t1f[1]
+            in2 = t2f is not None and t2f[0] <= f < t2f[1]
+            if not in1 and not in2:
+                gap_zone += 1
+        quality["gap_zone_frames"] = int(gap_zone)
 
     json_path = out_p.with_suffix(out_p.suffix + ".quality.json")
     json_path.write_text(json.dumps(quality, indent=2))
@@ -838,7 +1180,7 @@ def trim_and_combine(
         png_path = out_p.with_suffix(out_p.suffix + ".trusted_ranges.png")
         try:
             plot_trusted_ranges(
-                quality["trusted_ranges"],
+                quality["trusted_ranges_per_pass"],
                 best_frames,
                 switch_frame,
                 trim_start_f,
@@ -862,7 +1204,7 @@ def trim_and_combine(
         "trim_end": trim_end_f,
         "switch_frame": switch_frame,
         "quality_metrics": quality,
-        "trusted_ranges": quality["trusted_ranges"],
+        "trusted_ranges": quality["trusted_ranges_per_pass"],
         "trim_start_row": trim_start_row,
         "trim_end_row": trim_end_row,
         "best_frame_output": out_bf,
@@ -918,7 +1260,24 @@ def main() -> None:
         nargs=2,
         metavar=("L", "R"),
         default=None,
-        help="Obstacle marker names for walking-path Y filter",
+        help=(
+            "Obstacle marker names. Also used by first-stage obstacle prefilter "
+            "(best-frame validation, obstacle gap fill, per-point Y screening)."
+        ),
+    )
+    parser.add_argument(
+        "--no-obstacle-prefilter",
+        action="store_true",
+        help="Disable first-stage obstacle prefilter (best-frame pair check + obstacle repair + Y screening).",
+    )
+    parser.add_argument(
+        "--point-y-screening-margin-mm",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-frame Y-screen margin around obstacle pair Y range for point NaN screening "
+            "(default 0.0)."
+        ),
     )
     parser.add_argument(
         "--no-plot",
@@ -959,6 +1318,8 @@ def main() -> None:
     else:
         tq = args.trim_qc_preset
         cfg["trim_qc_preset"] = None if tq == "same-as-segments" else tq
+    cfg["obstacle_prefilter_enabled"] = not bool(args.no_obstacle_prefilter)
+    cfg["point_y_screening_margin_mm"] = float(args.point_y_screening_margin_mm)
 
     res = trim_and_combine(
         args.input_csvs,

@@ -337,12 +337,14 @@ def test_segment_markers_dict_for_trim_preset_lower_body_no_psis():
     assert {"LASI", "RASI", "LANK", "RANK"}.issubset(all_names)
 
 
-def test_segment_markers_dict_for_trim_preset_legs_feet_no_asis():
+def test_segment_markers_dict_for_trim_preset_legs_feet_with_asis_thigh():
     d = segment_markers_dict_for_trim_preset("legs-feet")
     all_names = {str(m).strip() for names in d.values() for m in names}
-    assert "LASI" not in all_names and "RASI" not in all_names
+    assert "LASI" in all_names and "RASI" in all_names
     assert "LPSI" not in all_names and "RPSI" not in all_names
     assert {"LTHI", "LANK", "RTHI", "RANK"}.issubset(all_names)
+    assert d["L_Foot"] == ["LANK", "LHEE", "LTOE"]
+    assert d["R_Foot"] == ["RANK", "RHEE", "RTOE"]
 
 
 def test_segment_markers_dict_for_trim_preset_legs_feet_alias():
@@ -351,10 +353,10 @@ def test_segment_markers_dict_for_trim_preset_legs_feet_alias():
     assert segment_markers_dict_for_trim_preset("default") == lf
 
 
-def test_segment_markers_dict_for_trim_preset_default_is_legs_feet_no_asis():
+def test_segment_markers_dict_for_trim_preset_default_is_legs_feet():
     d = segment_markers_dict_for_trim_preset("default")
     all_names = {str(m).strip() for names in d.values() for m in names}
-    assert "LASI" not in all_names and "RASI" not in all_names
+    assert "LASI" in all_names and "RASI" in all_names
     assert "L_Thigh" in d
 
 
@@ -393,6 +395,8 @@ def test_resolve_visibility_ratio_falls_back_when_no_leg_columns(tmp_path):
 
 def test_trim_trial_with_legs_feet_preset_smoke(tmp_path):
     labels = [
+        "LASI",
+        "RASI",
         "LTHI",
         "LKNE",
         "LTIB",
