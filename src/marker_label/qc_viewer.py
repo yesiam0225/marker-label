@@ -84,9 +84,11 @@ def run_viewer(
     background : 'white' or 'black'
     segment_color : color of segment lines (default 'darkblue')
     scale_factor : multiply coordinates by this (e.g. 1000 if file is in meters and you want to display as mm).
-    label_font_size : font size for point labels (default 18). Use --font-size in CLI to override.
+    label_font_size : font size for point labels (default 18 when calling this function directly;
+        ``marker-label-view`` CLI defaults to 21). Use ``--font-size`` in CLI to override.
     y_clip_min_mm : if set, hide markers (and segment endpoints) with lab Y below this (mm, after scale_factor).
     y_clip_max_mm : if set, hide markers with lab Y above this (mm, after scale_factor).
+        The CLI defaults to -500 and 1200 mm unless overridden.
     """
     from .segments import segment_lines_for_frame_by_segment, SEGMENT_COLORS, SEGMENTS
 
@@ -782,7 +784,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="3D viewer for labeled C3D/CSV with segments (PyVista).")
     parser.add_argument("file", help="Labeled .c3d or labeled .csv file")
     parser.add_argument("--point-size", type=float, default=12.0, help="Marker size (default 12)")
-    parser.add_argument("--font-size", type=float, default=18.0, metavar="SIZE", help="Point label font size (default 18)")
+    parser.add_argument("--font-size", type=float, default=21.0, metavar="SIZE", help="Point label font size (default 21)")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier (default 1)")
     parser.add_argument("--background", choices=("white", "black"), default="white", help="Background color")
     parser.add_argument("--segment-color", default="darkblue", help="Color of segment lines (default darkblue)")
@@ -790,16 +792,16 @@ def main() -> None:
     parser.add_argument(
         "--y-clip-min",
         type=float,
-        default=None,
+        default=-500.0,
         metavar="MM",
-        help="Hide markers and segment endpoints with lab Y below this (mm, after --scale). Example: -1000",
+        help="Hide markers and segment endpoints with lab Y below this (mm, after --scale; default -500).",
     )
     parser.add_argument(
         "--y-clip-max",
         type=float,
-        default=None,
+        default=1200.0,
         metavar="MM",
-        help="Hide markers with lab Y above this (mm, after --scale).",
+        help="Hide markers with lab Y above this (mm, after --scale; default 1200).",
     )
     args = parser.parse_args()
     run_viewer(
