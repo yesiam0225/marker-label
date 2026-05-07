@@ -62,6 +62,7 @@ CLAVRBAK_OUTSIDE_SHOULDER_Y_RANGE = "CLAV_OR_RBAK_OUTSIDE_SHOULDER_Y_RANGE"
 
 # Tie-break when two CLAV/RBAK candidates have nearly equal A/P (dot_back); same scale as head markers.
 _CLAV_RBAK_AP_TIE_ATOL = 1e-7
+_STRN_T10_AP_MARGIN_MM = 10.0
 
 
 class CLAVRBAKValidationError(Exception):
@@ -575,6 +576,7 @@ def assign_strn_t10_arm4_after_clav_rbak(
     skipped_label_upper: frozenset[str] | None = None,
     clav_body_idx: int | None = None,
     c7_body_idx: int | None = None,
+    strn_t10_ap_margin_mm: float = _STRN_T10_AP_MARGIN_MM,
 ) -> list[tuple[int, str]]:
     """
     After CLAV/RBAK: from remaining points take the 6 highest Z. Two points with Y
@@ -668,6 +670,21 @@ def assign_strn_t10_arm4_after_clav_rbak(
                 order_ap = np.argsort(dot_back)
                 anterior_pt = in_band[int(order_ap[0])]
                 posterior_pt = in_band[int(order_ap[1])]
+        # Safety guard: STRN must be anterior to T10 in A/P.
+        # If Y-reference matching picks the opposite order, flip STRN/T10.
+        ap_margin = float(strn_t10_ap_margin_mm)
+        dot_strn = float(points_frame[anterior_pt, :2] @ d_back_xy)
+        dot_t10 = float(points_frame[posterior_pt, :2] @ d_back_xy)
+        if dot_strn > dot_t10 + ap_margin:
+            logger = logging.getLogger(__name__)
+            logger.info(
+                "STRN/T10 AP guard swap applied: STRN dot_back %.2f > T10 %.2f + margin %.2f; swapping.",
+                dot_strn,
+                dot_t10,
+                ap_margin,
+            )
+            anterior_pt, posterior_pt = posterior_pt, anterior_pt
+            dot_strn, dot_t10 = dot_t10, dot_strn
         strn_t10_consumed = {anterior_pt, posterior_pt}
         strn_t10_assignments = [
             (p, lab)
@@ -1590,6 +1607,7 @@ def label_body_markers(
     obstacle_points_dynamic: np.ndarray | None = None,
     obstacle_y_lo_hi: tuple[float, float] | None = None,
     skipped_label_names: Sequence[str] | None = None,
+    strn_t10_ap_margin_mm: float = _STRN_T10_AP_MARGIN_MM,
     assignment_trace: list[tuple[str, list[tuple[int, str]]]] | None = None,
     trace_marker_names: Collection[str] | None = None,
 ) -> tuple[list[str], np.ndarray]:
@@ -1630,6 +1648,8 @@ def label_body_markers(
     skipped_label_names : optional anatomical names (e.g. from ``skip_label_names`` in the pipeline)
         to omit in axis-based steps (STRN/T10/arm, pelvis/arm12, leg/foot12); those points are
         matched later via Z-band / Hungarian instead of using a fallback string.
+    strn_t10_ap_margin_mm : A/P safety margin for STRN/T10 ordering at best frame. If
+        ``dot_back(STRN) > dot_back(T10) + margin``, STRN and T10 are swapped.
     assignment_trace : optional output list; when ``trace_marker_names`` is non-empty, appends
         ``(stage_name, [(pi, label), ...])`` for those markers after key steps.
     trace_marker_names : marker names to record in ``assignment_trace`` (case-insensitive).
@@ -1818,6 +1838,7 @@ def label_body_markers(
                 skipped_label_upper=skipped_upper,
                 clav_body_idx=clav_body_idx if clav_body_idx >= 0 else None,
                 c7_body_idx=c7_body_idx if c7_body_idx >= 0 else None,
+                strn_t10_ap_margin_mm=float(strn_t10_ap_margin_mm),
             )
             _trace_pairs("strn_t10_arm4", strn_t10_arm_assignments)
             if strn_t10_arm_assignments:

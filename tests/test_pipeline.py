@@ -12,7 +12,11 @@ from marker_label.obstacle import (
     screened_indices_extra_stationary_to_drop,
     visibility_fraction,
 )
-from marker_label.body_labeling import match_markers_to_template, best_frame_for_matching
+from marker_label.body_labeling import (
+    assign_strn_t10_arm4_after_clav_rbak,
+    best_frame_for_matching,
+    match_markers_to_template,
+)
 from marker_label.gap_fill import fill_gaps_1d, fill_gaps_trajectory
 from marker_label.errors import LabelingPipelineError
 from marker_label.pipeline import loaded_column_indices_matching_label_regex
@@ -173,6 +177,49 @@ def test_best_frame_middle():
     residual[50, :] = 0.1  # best at 50
     best = best_frame_for_matching(points, residual, middle_start=0.2, middle_end=0.8)
     assert 20 <= best < 80
+
+
+def test_strn_t10_ap_guard_swaps_misordered_y_ref_pick():
+    """If Y-ref selection inverts A/P, STRN/T10 are swapped back by AP guard."""
+    pts = np.full((10, 3), np.nan, dtype=np.float64)
+    # Shoulder band
+    pts[0] = [0.0, 200.0, 1200.0]  # LSHO
+    pts[1] = [0.0, 500.0, 1190.0]  # RSHO
+    # Two STRN/T10 candidates in shoulder Y-band (posterior has larger x because d_back=[1,0])
+    pts[2] = [100.0, 340.0, 1100.0]  # anterior candidate (should become STRN)
+    pts[3] = [300.0, 330.0, 1095.0]  # posterior candidate (should become T10)
+    # Four arm candidates
+    pts[4] = [80.0, 160.0, 1080.0]
+    pts[5] = [70.0, 180.0, 1075.0]
+    pts[6] = [90.0, 520.0, 1070.0]
+    pts[7] = [85.0, 540.0, 1065.0]
+    # Y references used by STRN/T10 split
+    pts[8] = [0.0, 330.0, 1000.0]  # CLAV
+    pts[9] = [0.0, 340.0, 1010.0]  # C7
+
+    template = {
+        "STRN": np.array([0.0, 0.0, 0.0]),
+        "T10": np.array([0.0, 0.0, 0.0]),
+        "LUPA": np.array([0.0, 0.0, 0.0]),
+        "RUPA": np.array([0.0, 0.0, 0.0]),
+        "LELB": np.array([0.0, 0.0, 0.0]),
+        "RELB": np.array([0.0, 0.0, 0.0]),
+    }
+    out = assign_strn_t10_arm4_after_clav_rbak(
+        pts,
+        d_back_xy=np.array([1.0, 0.0]),
+        d_right_xy=np.array([0.0, 1.0]),
+        exclude_pt_indices={0, 1, 8, 9},
+        lsho_idx=0,
+        rsho_idx=1,
+        template=template,
+        clav_body_idx=8,
+        c7_body_idx=9,
+        strn_t10_ap_margin_mm=10.0,
+    )
+    by_label = {lab: pi for pi, lab in out}
+    assert by_label["STRN"] == 2
+    assert by_label["T10"] == 3
 
 
 def test_fill_gaps_1d_short():
