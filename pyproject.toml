@@ -31,12 +31,16 @@ marker-label-trial-trim = "marker_label.trial_trim:main"
 marker-label-trim-frames = "marker_label.trim_csv_by_frames:main"
 marker-label-trim-combine = "marker_label.trial_trim_combine:main"
 marker-label-correct-trimmed = "marker_label.trimmed_csv_marker_correction:main"
+marker-label-gap-fill = "marker_label.gap_filling.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marker_label"]
 
 [tool.hatch.build.targets.sdist]
 packages = ["src/marker_label"]
+
+[tool.pytest.ini_options]
+markers = ["integration: uses bundled trial CSV data"]
 
 [tool.ruff]
 line-length = 100
