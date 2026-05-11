@@ -6,7 +6,7 @@ original CSV's ``*.csv.bestframe`` when that argument is ``None``) and tier-base
 rules so upper-body markers (not verified by leg-only trim) can be envelope-filtered, swapped,
 rejected, or reassigned from unlabeled columns.
 
-Staged pipeline: **envelope (1)** → **pelvis combinatorial swap (2)** → chain / same / cross-segment swaps
+Staged pipeline: **trajectory swap (0)** → **envelope (1)** → **pelvis combinatorial swap (2)** → chain / same / cross-segment swaps
 → rejection → unlabeled assignment → continuity. Stage 5 assigns unlabeled points with
 **priority 1** for markers invalidated in stages 1 or 4, then **priority 2** for originally
 occluded (missing) markers, so recoverable points are not taken by unrelated gaps first.
@@ -37,6 +37,7 @@ from .trial_trim import (
 )
 from .trial_trim_combine import compute_subject_envelope
 from .walking_setup import determine_setup
+from .trajectory_swap import DEFAULT_TRAJECTORY_SWAP_CONFIG, trajectory_based_correction
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chain_swap_min_consecutive_frames": 10,
     "chain_swap_min_visible_per_side": 2,
 }
+DEFAULT_CONFIG.update(DEFAULT_TRAJECTORY_SWAP_CONFIG)
 
 DEFAULT_BILATERAL_CHAINS: dict[str, tuple[list[str], list[str]]] = {
     "arm": (
@@ -1649,6 +1651,7 @@ def compute_quality_metrics(
     full_chain_swap_intervals: Sequence[Mapping[str, Any]] | None = None,
     stage5_5_full_chain_swap_frames_affected: int = 0,
     invalidated_marker_frames: Sequence[Mapping[str, Any]] | None = None,
+    stage0_trajectory_swap: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     seg_stems = [str(x).strip() for names in segment_markers_dict.values() for x in names]
     seg_stems = list(dict.fromkeys(seg_stems))
@@ -1780,6 +1783,7 @@ def compute_quality_metrics(
         },
         "full_chain_swap_intervals": list(full_chain_swap_intervals or []),
         "invalidation_recovery_summary": invalidation_recovery_summary,
+        "stage0_trajectory_swap": dict(stage0_trajectory_swap or {"enabled": False}),
     }
 
 
@@ -1807,7 +1811,7 @@ def correct_markers(
     ``bestframe_sidecar_path(original_csv_path)`` is used (same convention as
     :func:`marker_label.trial_trim.load_best_frame_1based` / pipeline ``*.csv.bestframe``).
 
-    See module docstring for the staged pipeline (envelope → pelvis → other swaps →
+    See module docstring for the staged pipeline (trajectory swap → envelope → pelvis → other swaps →
     rejection → unlabeled assignment → continuity).
     """
     cfg = {**DEFAULT_CONFIG, **(config or {})}
@@ -1890,6 +1894,34 @@ def correct_markers(
     log_all: list[dict[str, Any]] = []
     sustained: list[str] = []
     invalidated_marker_frames: list[dict[str, Any]] = []
+
+    unlabeled_idx_pre: list[int] = []
+    unlabeled_stem_pre: list[str] = []
+    for si, stem in enumerate(meta_work["all_stems"]):
+        if _is_unlabeled_stem(stem):
+            unlabeled_idx_pre.append(si)
+            unlabeled_stem_pre.append(stem)
+
+    stage0_summary: dict[str, Any] = {"enabled": False}
+    if cfg.get("enable_trajectory_swap_detection", True):
+        try:
+            setup_traj = determine_chain_swap_setup(meta_orig)
+            s0_log, stage0_summary = trajectory_based_correction(
+                points,
+                meta_work,
+                meta_orig,
+                setup_traj,
+                ref_geom,
+                seg_dict,
+                marker_tier_map,
+                unlabeled_idx_pre,
+                unlabeled_stem_pre,
+                cfg,
+            )
+            log_all.extend(s0_log)
+        except ValueError as e:
+            logger.warning("Stage 0 trajectory swap skipped: %s", e)
+            stage0_summary = {"enabled": False, "skipped_reason": str(e)}
 
     centroids, envelope_outside, env_info = compute_subject_envelope(
         meta_work,
@@ -1978,12 +2010,8 @@ def correct_markers(
         )
     )
 
-    unlabeled_idx: list[int] = []
-    unlabeled_stem: list[str] = []
-    for si, stem in enumerate(meta_work["all_stems"]):
-        if _is_unlabeled_stem(stem):
-            unlabeled_idx.append(si)
-            unlabeled_stem.append(stem)
+    unlabeled_idx = unlabeled_idx_pre
+    unlabeled_stem = unlabeled_stem_pre
     log_all.extend(
         apply_unlabeled_assignment_with_priority(
             points,
@@ -2025,6 +2053,7 @@ def correct_markers(
         full_chain_swap_intervals=chain_interval_meta,
         stage5_5_full_chain_swap_frames_affected=int(chain_frames_aff),
         invalidated_marker_frames=invalidated_marker_frames,
+        stage0_trajectory_swap=stage0_summary,
     )
     save_quality_metrics(qm, out_p.with_suffix(out_p.suffix + ".quality.json"))
     try:
