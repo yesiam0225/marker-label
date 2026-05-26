@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 try:
@@ -91,6 +93,60 @@ def load_c3d(path: str, scale_factor: float = 1.0) -> dict:
             "rate": rate,
             "first_frame": first_frame,
         }
+
+
+def load_labeled_flat_csv_as_c3d_dict(path: str | Path, scale_factor: float = 1.0) -> dict:
+    """
+    Load a labeled flat CSV (same layout as :func:`marker_label.trial_trim.parse_labeled_csv`)
+    into the same dict shape as :func:`load_c3d`.
+
+    Use for **static** (anatomical names per column) and/or **dynamic** (unlabeled ``*`` names ok)
+    when the trial is already exported as CSV instead of C3D. Residual is always ``None``.
+    """
+    from .trial_trim import parse_labeled_csv
+
+    _, meta = parse_labeled_csv(path)
+    pts = np.asarray(meta["points"], dtype=np.float64).copy()
+    if scale_factor != 1.0:
+        pts *= float(scale_factor)
+    frames = np.asarray(meta["frames"], dtype=np.int64)
+    rate = float(meta.get("rate") or 0.0)
+    labels = [str(s) for s in meta["all_stems"]]
+    n_frames = int(meta["n_frames"])
+    n_points = int(meta["n_markers"])
+    first_frame = int(frames[0]) if n_frames > 0 else 1
+    return {
+        "points": pts,
+        "residual": None,
+        "labels": labels,
+        "point_labels": labels,
+        "n_frames": n_frames,
+        "n_points": n_points,
+        "rate": rate,
+        "first_frame": first_frame,
+    }
+
+
+def load_c3d_or_csv(path: str | Path, scale_factor: float = 1.0) -> dict:
+    """
+    Load a motion trial from ``.csv`` (labeled flat) or ``.c3d`` (binary).
+
+    CSV must match :func:`marker_label.trial_trim.parse_labeled_csv` (frame, time, triplets).
+    """
+    suf = Path(path).suffix.lower()
+    if suf == ".csv":
+        return load_labeled_flat_csv_as_c3d_dict(path, scale_factor=scale_factor)
+    try:
+        return load_c3d(path, scale_factor=scale_factor)
+    except AssertionError as e:
+        msg = str(e)
+        if "magic" in msg.lower() and suf != ".csv":
+            raise ValueError(
+                f"Not a readable C3D file ({path!r}): {msg}. "
+                "If this trial is a labeled flat CSV export, use a path ending in .csv "
+                "(frame, time, marker_x/y/z columns per marker_label.trial_trim.parse_labeled_csv)."
+            ) from e
+        raise
 
 
 def save_c3d(

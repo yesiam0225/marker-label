@@ -32,6 +32,7 @@ marker-label-trim-frames = "marker_label.trim_csv_by_frames:main"
 marker-label-trim-combine = "marker_label.trial_trim_combine:main"
 marker-label-correct-trimmed = "marker_label.trimmed_csv_marker_correction:main"
 marker-label-gap-fill = "marker_label.gap_filling.cli:main"
+marker-label-synthesize-rhee = "marker_label.synthesize_rhee_from_static:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marker_label"]

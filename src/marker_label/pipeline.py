@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .io import load_c3d
+from .io import load_c3d_or_csv
 from .constants import (
     PELVIS_MARKERS,
     DEFAULT_EXTRA_STATIONARY_MOTION_MAX_MM,
@@ -437,8 +437,8 @@ def run_pipeline(
     -------
     info : dict with keys (static_labels, obstacle_indices, etc.)
     """
-    static = load_c3d(static_path, scale_factor=static_scale)
-    dynamic = load_c3d(dynamic_path, scale_factor=dynamic_scale)
+    static = load_c3d_or_csv(static_path, scale_factor=static_scale)
+    dynamic = load_c3d_or_csv(dynamic_path, scale_factor=dynamic_scale)
     points_s = static["points"]
     labels_s = static["labels"]
     original_n_dynamic = int(dynamic["points"].shape[1])

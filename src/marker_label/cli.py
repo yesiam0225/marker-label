@@ -29,10 +29,19 @@ from .constants import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Label dynamic C3D using subject's labeled static C3D.",
+        description=(
+            "Label dynamic C3D or flat CSV using the subject's labeled static C3D or flat CSV. "
+            "Both inputs may be .c3d or .csv (CSV = same layout as pipeline export: frame, time, marker_x/y/z)."
+        ),
     )
-    parser.add_argument("static", help="Path to labeled static C3D file")
-    parser.add_argument("dynamic", help="Path to unlabeled dynamic C3D file")
+    parser.add_argument(
+        "static",
+        help="Labeled static C3D or labeled flat CSV (anatomical marker columns)",
+    )
+    parser.add_argument(
+        "dynamic",
+        help="Unlabeled dynamic C3D or flat CSV (same frame/time/marker triplet layout as pipeline CSV export)",
+    )
     parser.add_argument(
         "-o",
         "--output",
