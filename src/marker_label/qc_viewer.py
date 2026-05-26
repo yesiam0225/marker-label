@@ -792,9 +792,9 @@ def main() -> None:
     parser.add_argument(
         "--y-clip-min",
         type=float,
-        default=-500.0,
+        default=-1000.0,
         metavar="MM",
-        help="Hide markers and segment endpoints with lab Y below this (mm, after --scale; default -500).",
+        help="Hide markers and segment endpoints with lab Y below this (mm, after --scale; default -1000).",
     )
     parser.add_argument(
         "--y-clip-max",
