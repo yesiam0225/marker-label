@@ -153,6 +153,15 @@ For a detailed explanation of the logic and what to check when labeling fails, s
 
 Vicon full-body pelvis markers: LASI, RASI, LPSI, RPSI (and SACR if present). Used when building template in pelvis frame; currently template matching defaults to lab frame.
 
+## Related projects
+
+Labeled CSV output (`frame`, `{marker}_x/y/z`) is the input contract for downstream gait analysis:
+
+| Repository | Role |
+|------------|------|
+| [gait-spatiotemporal](https://github.com/gait-spatiotemporal/gait-spatiotemporal) | Rule-based IC/TO detection and spatiotemporal parameters |
+| [gait-events-vlm](https://github.com/gait-events-vlm/gait-events-vlm) | VLM-based IC/TO from foot Z plots (experimental / QC) |
+
 ## License
 
 See repository.
