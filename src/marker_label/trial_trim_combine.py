@@ -299,11 +299,32 @@ def _sync_data_rows_from_points(meta: dict[str, Any]) -> None:
 
 
 def _validate_two_pass_frames_time(meta1: dict[str, Any], meta2: dict[str, Any]) -> None:
-    if not np.array_equal(meta1["frames"], meta2["frames"]):
-        raise ValueError("Two-pass mode requires identical `frame` columns in both CSVs")
+    f1, f2 = meta1["frames"], meta2["frames"]
+    if not np.array_equal(f1, f2):
+        n1, n2 = int(f1.shape[0]), int(f2.shape[0])
+        msg = (
+            "Two-pass mode requires identical `frame` columns in both CSVs "
+            f"(same length and values). Got n_frames={n1} vs {n2}."
+        )
+        if n1 == n2 and n1 > 0:
+            diff = np.where(f1 != f2)[0]
+            if diff.size:
+                i = int(diff[0])
+                msg += f" First mismatch at row index {i}: frame {f1[i]} vs {f2[i]}."
+        elif n1 > 0 and n2 > 0:
+            msg += f" Pass1 frame range [{int(f1[0])}, {int(f1[-1])}], pass2 [{int(f2[0])}, {int(f2[-1])}]."
+        msg += (
+            " Use two labeled CSVs exported from the same trial with the same frame/time grid "
+            "(e.g. both full-length, or trim both the same way before labeling). "
+            "If you only need one labeling pass, pass a single CSV."
+        )
+        raise ValueError(msg)
     t1, t2 = meta1["times"], meta2["times"]
     if t1.shape != t2.shape or not np.allclose(t1, t2, rtol=0.0, atol=0.0, equal_nan=True):
-        raise ValueError("Two-pass mode requires identical `time` columns in both CSVs")
+        raise ValueError(
+            "Two-pass mode requires identical `time` columns in both CSVs "
+            "(same length and values, element-wise). Check that both files share the same sampling grid."
+        )
 
 
 def _canonical_stems_pass1_then_pass2_only(stems1: list[str], stems2: list[str]) -> list[str]:

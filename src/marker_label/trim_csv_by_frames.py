@@ -17,6 +17,13 @@ from typing import Any
 
 import numpy as np
 
+_TRIM_FRAMES_CSV_ONLY = (
+    "marker-label-trim-frames only trims labeled flat CSV files (UTF-8 text with "
+    "frame, time, marker_x/y/z columns). It does not read binary .c3d. "
+    "Export the trial to a labeled CSV first, then trim that file (or use a C3D editor "
+    "to clip frames in the .c3d directly)."
+)
+
 from .trial_trim import (
     bestframe_sidecar_path,
     parse_labeled_csv,
@@ -53,7 +60,14 @@ def trim_labeled_csv_by_frame_range(
             f"end_frame ({end_frame}) must be >= start_frame ({start_frame})"
         )
 
-    _, metadata = parse_labeled_csv(input_csv)
+    try:
+        _, metadata = parse_labeled_csv(input_csv)
+    except UnicodeDecodeError as e:
+        p = Path(input_csv)
+        hint = _TRIM_FRAMES_CSV_ONLY
+        if p.suffix.lower() == ".c3d":
+            hint = f"{p.name} is a binary C3D file. {_TRIM_FRAMES_CSV_ONLY}"
+        raise ValueError(hint) from e
     frames: np.ndarray = metadata["frames"]
     n_frames = int(metadata["n_frames"])
 
@@ -113,7 +127,7 @@ def main() -> None:
             "Copies *.csv.bestframe when the best frame lies in the kept range."
         )
     )
-    parser.add_argument("input_csv", help="Input labeled CSV")
+    parser.add_argument("input_csv", help="Input labeled flat CSV (not .c3d; export labels to CSV first)")
     parser.add_argument("-o", "--output", required=True, help="Output CSV path")
     parser.add_argument(
         "--start",
@@ -135,6 +149,12 @@ def main() -> None:
         help="Print a JSON summary to stdout",
     )
     args = parser.parse_args()
+
+    in_path = Path(args.input_csv)
+    if in_path.suffix.lower() == ".c3d":
+        parser.error(
+            f"{_TRIM_FRAMES_CSV_ONLY} (got {in_path.name!r}; input must be a labeled .csv.)"
+        )
 
     info = trim_labeled_csv_by_frame_range(
         args.input_csv,
