@@ -1,0 +1,6 @@
+---
+alwaysApply: true
+description: Canonical AI rules live in .rules/; tool-specific dirs are import wrappers only.
+---
+
+@.rules/rules-location.md
