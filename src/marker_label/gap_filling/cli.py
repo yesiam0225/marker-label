@@ -66,6 +66,26 @@ def main() -> None:
         help="Disable continuity validation after fills",
     )
     parser.add_argument(
+        "--static-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Subject labeled static trial: flat .csv (frame, time, marker_x/y/z) "
+            "or labeled .c3d with anatomical marker names"
+        ),
+    )
+    parser.add_argument(
+        "--enable-shoulder-from-thorax",
+        action="store_true",
+        help="Fill LSHO/RPSI gaps from C7/CLAV/RBAK using static shoulder-local offsets (walking trials)",
+    )
+    parser.add_argument(
+        "--no-two-marker-rigid",
+        action="store_true",
+        help="Disable 2-visible-marker rigid fill for 3-marker foot/hand segments",
+    )
+    parser.add_argument(
         "--config-json",
         type=str,
         default=None,
@@ -92,6 +112,10 @@ def main() -> None:
         cfg["max_velocity_mm_per_frame"] = float(args.max_velocity)
     if args.no_continuity_check:
         cfg["validate_continuity"] = False
+    if args.no_two_marker_rigid:
+        cfg["allow_two_marker_rigid"] = False
+    if args.enable_shoulder_from_thorax:
+        cfg["enable_shoulder_from_thorax"] = True
 
     if args.disable_asis_only_pelvis:
         cfg["asis_only_enabled"] = False
@@ -106,6 +130,7 @@ def main() -> None:
             args.output,
             seg,
             config=cfg,
+            static_csv_path=args.static_csv,
             verbose=bool(args.verbose),
         )
     except Exception as e:

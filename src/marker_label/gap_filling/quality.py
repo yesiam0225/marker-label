@@ -50,7 +50,13 @@ def compute_quality_metrics(
     va = _visibility_counts(points_after, stems, label_to_idx)
     vc = {m: int(va.get(m, 0) - vb.get(m, 0)) for m in stems}
 
-    fills_by_method = {"rigid_body": 0, "asis_only": 0, "spline": 0, "unfillable": 0}
+    fills_by_method = {
+        "rigid_body": 0,
+        "asis_only": 0,
+        "spline": 0,
+        "shoulder_from_thorax": 0,
+        "unfillable": 0,
+    }
     fills_by_marker: dict[str, int] = {m: 0 for m in stems}
     fills_by_conf = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for row in fills_log:

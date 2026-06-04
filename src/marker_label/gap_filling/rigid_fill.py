@@ -8,6 +8,9 @@ import numpy as np
 
 from marker_label.trial_trim import kabsch
 
+from .segment_utils import min_visible_others_for_segment, segment_uses_two_marker_rigid
+from .two_marker_static import pick_two_anchor_markers, predict_from_two_anchors
+
 
 def _confidence_from_residual(max_res: float, cfg: Mapping) -> str:
     hi = float(cfg.get("rigid_fill_high_residual_mm", 5))
@@ -29,6 +32,9 @@ def rigid_body_fill(
     label_to_idx: Mapping[str, int],
     config: Mapping,
     frame_column: np.ndarray,
+    *,
+    two_marker_offsets: Mapping[str, Mapping[str, tuple]] | None = None,
+    lab_vertical: tuple[float, float, float] = (0.0, 1.0, 0.0),
 ) -> list[dict]:
     """
     Frame-wise rigid fill. Returns fill log rows (does not mutate ``points``).
@@ -56,6 +62,12 @@ def rigid_body_fill(
 
     ref_seg = reference[segment]
     max_res_thr = float(config.get("rigid_fill_max_residual_mm", 30))
+    min_others = min_visible_others_for_segment(seg_names, config)
+    use_two = segment_uses_two_marker_rigid(segment, seg_names, config)
+    vert = np.array(lab_vertical, dtype=np.float64)
+    seg_two = (two_marker_offsets or {}).get(segment, {}) if two_marker_offsets else {}
+    mk = str(marker).strip()
+    two_pack = seg_two.get(mk) if use_two else None
     out: list[dict] = []
 
     for f in range(start, end + 1):
@@ -63,7 +75,6 @@ def rigid_body_fill(
         used: list[str] = []
         p_ref_list: list[np.ndarray] = []
         p_cur_list: list[np.ndarray] = []
-        mk = str(marker).strip()
         for m in seg_names:
             if str(m).strip() == mk:
                 continue
@@ -75,7 +86,7 @@ def rigid_body_fill(
             used.append(m)
             p_ref_list.append(np.asarray(ref_seg[m], dtype=np.float64))
             p_cur_list.append(np.asarray(points[f, mi, :], dtype=np.float64))
-        if len(used) < 3:
+        if len(used) < min_others:
             out.append(
                 _row(
                     fc,
@@ -93,14 +104,53 @@ def rigid_body_fill(
                 )
             )
             continue
-        p_ref = np.stack(p_ref_list, axis=0)
-        p_cur = np.stack(p_cur_list, axis=0)
-        r, t = kabsch(p_ref, p_cur)
-        pred_local = np.asarray(ref_seg[marker], dtype=np.float64)
-        pred = pred_local @ r.T + t
-        recon = p_ref @ r.T + t
-        res = np.linalg.norm(recon - p_cur, axis=1)
-        max_res = float(np.max(res))
+
+        if len(used) >= 3:
+            p_ref = np.stack(p_ref_list, axis=0)
+            p_cur = np.stack(p_cur_list, axis=0)
+            r, t = kabsch(p_ref, p_cur)
+            pred_local = np.asarray(ref_seg[mk], dtype=np.float64)
+            pred = pred_local @ r.T + t
+            recon = p_ref @ r.T + t
+            res = np.linalg.norm(recon - p_cur, axis=1)
+            max_res = float(np.max(res))
+        elif len(used) == 2 and two_pack is not None:
+            off, flip, o_m, x_m = two_pack
+            pair = pick_two_anchor_markers(seg_names, mk, used)
+            if pair is None:
+                max_res = np.nan
+                pred = np.full(3, np.nan)
+            else:
+                a_m, b_m = pair
+                mi_a, mi_b = label_to_idx[a_m], label_to_idx[b_m]
+                pred = predict_from_two_anchors(
+                    points[f, mi_a, :],
+                    points[f, mi_b, :],
+                    off,
+                    vert,
+                    flip,
+                )
+                max_res = 0.0 if np.isfinite(pred).all() else np.nan
+            used = list(used)
+            used.append("two_marker_static")
+        else:
+            out.append(
+                _row(
+                    fc,
+                    marker,
+                    "rigid_body",
+                    False,
+                    "",
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    ";".join(used),
+                    length,
+                    "need_three_markers_or_static_two_marker",
+                )
+            )
+            continue
         if max_res > max_res_thr:
             out.append(
                 _row(

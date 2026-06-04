@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
+from .segment_utils import min_visible_others_for_segment
+
 
 def _marker_missing_row(points_row: np.ndarray) -> bool:
     return not np.isfinite(points_row).all()
@@ -84,8 +86,9 @@ def categorize_gap(
 
     if seg is not None and (attempt_long or length <= long_thr):
         seg_names = list(dict.fromkeys(str(x).strip() for x in segment_markers_dict[seg]))
+        min_others = min_visible_others_for_segment(seg_names, config)
         if all(
-            _count_visible_segment_others(points, label_to_idx, seg_names, marker, f) >= 3
+            _count_visible_segment_others(points, label_to_idx, seg_names, marker, f) >= min_others
             for f in range(start, end + 1)
         ):
             return "rigid_body", seg

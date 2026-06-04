@@ -31,6 +31,7 @@ marker-label-trial-trim = "marker_label.trial_trim:main"
 marker-label-trim-frames = "marker_label.trim_csv_by_frames:main"
 marker-label-trim-combine = "marker_label.trial_trim_combine:main"
 marker-label-correct-trimmed = "marker_label.trimmed_csv_marker_correction:main"
+marker-label-relabel = "marker_label.relabel_markers:main"
 marker-label-gap-fill = "marker_label.gap_filling.cli:main"
 marker-label-synthesize-rhee = "marker_label.synthesize_rhee_from_static:main"
 

@@ -1,0 +1,21 @@
+subject_id,static_path,auto_discovered,notes
+BBA01,data/BBA01/BBA01 Cal 01.c3d,yes,
+BBA02,data/BBA02/BBA02 Cal 01.c3d,yes,
+BBA03,data/BBA02/BBA02 Trial 26.c3d,no,add path to static trial for BBA03
+BBA04,data/BBA04/BBA04 Cal 01.c3d,yes,
+BBA06,data/BBA06/BBA06 Cal 03.c3d,yes,
+BBA07,data/BBA07/BBA07 Cal 01.c3d,yes,
+BBA10,data/BBA10/BBA10 Cal 01.c3d,yes,
+BBA11,data/BBA11/BBA11 Trial 02.c3d,yes,
+BBA13,data/BBA13/BBA13 Cal 01.c3d,yes,
+BBA14,data/BBA14/BBA14 Cal 02.c3d,yes,
+BBC01,data/BBC01/BBC01 Cal 01.c3d,yes,
+BBC02,data/BBC01/BBC01 Trial 24.c3d,no,add path to static trial for BBC02
+BBC05,data/BBC05/BBC05 Cal 01.c3d,yes,
+BBC06,data/BBC06/BBC06 Cal 01.c3d,yes,
+BBC09,data/BBC07/BBC07 Trial 52.c3d,no,add path to static trial for BBC09
+BBC10,data/BBC10/BBC10 Cal 03.c3d,yes,
+BBC11,data/BBC11/BBC11 Cal 01.c3d,yes,
+BBC12,data/BBC12/BBC12 Cal 01.c3d,yes,
+BBC13,data/BBC13/BBC13 Cal 01.c3d,yes,
+BBC14,data/BBC14/BBC14 Cal 01.c3d,yes,

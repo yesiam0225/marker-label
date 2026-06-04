@@ -130,6 +130,7 @@ def asis_only_fill(
     *,
     lpsi_name: str = "LPSI",
     rpsi_name: str = "RPSI",
+    static_psi_offset: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> list[dict]:
     _ = reference
     start, end, length = gap
@@ -183,7 +184,7 @@ def asis_only_fill(
         return acc
 
     anchor_rows = collect_anchors()
-    if len(anchor_rows) < min_anchors:
+    if len(anchor_rows) < min_anchors and static_psi_offset is None:
         for f in range(start, end + 1):
             out.append(
                 _entry(
@@ -201,19 +202,27 @@ def asis_only_fill(
             )
         return out
 
-    mean_body_offset = np.zeros(3, dtype=np.float64)
-    for r in anchor_rows:
-        lasi_p = points[r, label_to_idx[lasi], :]
-        rasi_p = points[r, label_to_idx[rasi], :]
-        center_a = 0.5 * (lasi_p + rasi_p)
-        ml_a = _unit(rasi_p - lasi_p)
-        ap_a = ap_axis_at_anchor(points, r, label_to_idx, lasi, rasi, lpsi_name, rpsi_name)
-        si_a = _unit(np.cross(ap_a, ml_a))
-        ap_o_a = _unit(np.cross(ml_a, si_a))
-        r_a = np.stack([ml_a, si_a, ap_o_a], axis=1)
-        pt_a = points[r, label_to_idx[target_marker], :]
-        mean_body_offset += r_a.T @ (pt_a - center_a)
-    mean_body_offset /= float(len(anchor_rows))
+    if static_psi_offset is not None:
+        mean_body_offset = np.asarray(static_psi_offset[0], dtype=np.float64)
+        static_flip = np.asarray(static_psi_offset[1], dtype=np.float64)
+    else:
+        mean_body_offset = np.zeros(3, dtype=np.float64)
+        static_flip = None
+
+    if static_psi_offset is None:
+        for r in anchor_rows:
+            lasi_p = points[r, label_to_idx[lasi], :]
+            rasi_p = points[r, label_to_idx[rasi], :]
+            center_a = 0.5 * (lasi_p + rasi_p)
+            ml_a = _unit(rasi_p - lasi_p)
+            ap_a = ap_axis_at_anchor(points, r, label_to_idx, lasi, rasi, lpsi_name, rpsi_name)
+            si_a = _unit(np.cross(ap_a, ml_a))
+            ap_o_a = _unit(np.cross(ml_a, si_a))
+            r_a = np.stack([ml_a, si_a, ap_o_a], axis=1)
+            pt_a = points[r, label_to_idx[target_marker], :]
+            mean_body_offset += r_a.T @ (pt_a - center_a)
+        mean_body_offset /= float(len(anchor_rows))
+        static_flip = None
 
     for f in range(start, end + 1):
         fc = int(frame_column[f])
@@ -239,17 +248,23 @@ def asis_only_fill(
         rasi_p = points[f, label_to_idx[rasi], :]
         pelvis_center = 0.5 * (lasi_p + rasi_p)
         ml = _unit(rasi_p - lasi_p)
-        ap = interpolate_ap_axis(
-            points,
-            anchor_rows,
-            f,
-            label_to_idx,
-            frame_column,
-            lasi,
-            rasi,
-            lpsi_name,
-            rpsi_name,
-        )
+        if anchor_rows:
+            ap = interpolate_ap_axis(
+                points,
+                anchor_rows,
+                f,
+                label_to_idx,
+                frame_column,
+                lasi,
+                rasi,
+                lpsi_name,
+                rpsi_name,
+            )
+        elif static_psi_offset is not None and static_flip is not None:
+            ap_dir = static_flip - float(np.dot(static_flip, ml)) * ml
+            ap = _unit(ap_dir) if float(np.linalg.norm(ap_dir)) > 1e-9 else _unit(np.cross(ml, np.array([0.0, 1.0, 0.0])))
+        else:
+            ap = np.array([0.0, 1.0, 0.0], dtype=np.float64)
         si = _unit(np.cross(ap, ml))
         ap_orth = _unit(np.cross(ml, si))
         r_mat = np.stack([ml, si, ap_orth], axis=1)

@@ -20,7 +20,9 @@ from .gap_detection import categorize_gap, find_gaps
 from .quality import compute_quality_metrics
 from .reference import build_robust_reference
 from .rigid_fill import rigid_body_fill
+from .shoulder_from_thorax import shoulder_from_thorax_fill
 from .spline_fill import spline_fill
+from .static_reference import load_static_reference_bundle
 from .visualization import plot_gap_fill_summary
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,12 @@ DEFAULT_GAP_FILLING_CONFIG: dict[str, Any] = {
     "long_gap_threshold": 50,
     "attempt_long_gaps": True,
     "asis_only_enabled": True,
+    "allow_two_marker_rigid": True,
+    "two_marker_rigid_segment_names": None,
+    "lab_vertical": (0.0, 1.0, 0.0),
+    "enable_shoulder_from_thorax": False,
+    "shoulder_markers": ("LSHO", "RSHO"),
+    "thorax_markers": ("C7", "CLAV", "RBAK"),
 }
 
 
@@ -112,6 +120,7 @@ def gap_fill(
     asis_markers: tuple[str, ...] = ("LASI", "RASI"),
     config: dict[str, Any] | None = None,
     *,
+    static_csv_path: str | None = None,
     verbose: bool = False,
 ) -> dict[str, Any]:
     """
@@ -138,15 +147,37 @@ def gap_fill(
     asis = tuple(str(x).strip() for x in asis_markers)
 
     bf = _read_best_frame_column(in_path)
-    reference, ref_warnings = build_robust_reference(
-        meta["points"],
-        label_to_idx,
-        segment_markers_dict,
-        n_samples=int(cfg["reference_n_clean_samples"]),
-        best_frame=bf,
-        csv_path=in_path,
-        frames=frames,
-    )
+    lab_vertical = tuple(float(x) for x in cfg.get("lab_vertical", (0.0, 1.0, 0.0)))
+    reference_source = "dynamic"
+    two_marker_offsets: dict[str, dict[str, tuple]] = {}
+    pelvis_psi_static: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    shoulder_local: dict[str, np.ndarray] = {}
+
+    if static_csv_path:
+        bundle = load_static_reference_bundle(
+            static_csv_path,
+            segment_markers_dict,
+            label_to_idx,
+            n_samples=int(cfg["reference_n_clean_samples"]),
+            lab_vertical=lab_vertical,
+        )
+        reference = bundle["reference"]
+        ref_warnings = bundle["warnings"]
+        two_marker_offsets = bundle["two_marker_offsets"]
+        pelvis_psi_static = bundle["pelvis_psi_offset"]
+        shoulder_local = bundle["shoulder_local"]
+        reference_source = "static"
+        logger.info("Using static trial reference: %s", static_csv_path)
+    else:
+        reference, ref_warnings = build_robust_reference(
+            meta["points"],
+            label_to_idx,
+            segment_markers_dict,
+            n_samples=int(cfg["reference_n_clean_samples"]),
+            best_frame=bf,
+            csv_path=in_path,
+            frames=frames,
+        )
     for w in ref_warnings:
         logger.warning("%s", w)
 
@@ -187,6 +218,8 @@ def gap_fill(
                 label_to_idx,
                 cfg,
                 frames,
+                two_marker_offsets=two_marker_offsets,
+                lab_vertical=lab_vertical,
             )
             for r in rows:
                 key = (int(r["frame"]), str(marker).strip())
@@ -215,6 +248,7 @@ def gap_fill(
             )
             if cat != "asis_only":
                 continue
+            static_off = pelvis_psi_static.get(str(marker).strip())
             rows = asis_only_fill(
                 meta["points"],
                 marker,
@@ -225,6 +259,7 @@ def gap_fill(
                 label_to_idx,
                 cfg,
                 frames,
+                static_psi_offset=static_off,
             )
             for r in rows:
                 key = (int(r["frame"]), str(marker).strip())
@@ -233,6 +268,32 @@ def gap_fill(
                     _apply_success_row(meta, r, frames)
                 elif key not in fills_map:
                     fills_map[key] = dict(r)
+
+    # --- Pass 2b: shoulder from thorax (walking / minimal arm swing) ---
+    if cfg.get("enable_shoulder_from_thorax") and shoulder_local:
+        logger.info("Pass 2b: shoulder_from_thorax")
+        for sh in cfg.get("shoulder_markers", ("LSHO", "RSHO")):
+            sh = str(sh).strip()
+            if sh not in label_to_idx:
+                continue
+            mi = label_to_idx[sh]
+            for gap in find_gaps(meta["points"][:, mi, :]):
+                rows = shoulder_from_thorax_fill(
+                    meta["points"],
+                    sh,
+                    gap,
+                    label_to_idx,
+                    frames,
+                    shoulder_local,
+                    thorax_markers=tuple(str(x).strip() for x in cfg.get("thorax_markers", ("C7", "CLAV", "RBAK"))),
+                )
+                for r in rows:
+                    key = (int(r["frame"]), sh)
+                    if r.get("success"):
+                        fills_map[key] = dict(r)
+                        _apply_success_row(meta, r, frames)
+                    elif key not in fills_map:
+                        fills_map[key] = dict(r)
 
     # --- Pass 3: spline on remaining short gaps ---
     logger.info("Pass 3: spline")
@@ -318,6 +379,9 @@ def gap_fill(
         reverted_fills=rev,
     )
     quality["trial_name"] = in_path.name
+    quality["reference_source"] = reference_source
+    if static_csv_path:
+        quality["static_csv"] = str(static_csv_path)
 
     stem = str(out_path)
     fills_path = stem.replace(".csv", "_fills.csv")
