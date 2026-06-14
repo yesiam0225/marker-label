@@ -12,17 +12,19 @@ from marker_label.io import load_c3d
 from marker_label.trial_trim import bestframe_sidecar_path, parse_labeled_csv
 
 from .reference import build_robust_reference
+from .segment_utils import unique_segment_markers
 from .two_marker_static import static_offsets_for_three_marker_segment
 
 
 def _load_static_points_and_label_idx(
     static_path: str | Path,
     dynamic_label_to_idx: Mapping[str, int],
-) -> tuple[np.ndarray, dict[str, int], np.ndarray, str]:
+) -> tuple[np.ndarray, dict[str, int], dict[str, int], np.ndarray, str]:
     """
-    Load static trial as (points, label_to_idx, frames, format_tag).
+    Load static trial as (points, label_to_idx, label_to_idx_all, frames, format_tag).
 
-    ``label_to_idx`` maps anatomical names to columns in ``points`` (static file order).
+    ``label_to_idx`` maps dynamic markers present in the static file.
+    ``label_to_idx_all`` maps every anatomical label in the static file (for foot offsets).
     """
     path = Path(static_path)
     suf = path.suffix.lower()
@@ -34,9 +36,11 @@ def _load_static_points_and_label_idx(
                 f"{path.name} is not a UTF-8 labeled flat CSV. "
                 "Use a labeled .csv export, or pass a labeled static .c3d with --static-csv."
             ) from e
+        li = dict(meta["label_to_marker_idx"])
         return (
             np.asarray(meta["points"], dtype=np.float64),
-            dict(meta["label_to_marker_idx"]),
+            li,
+            dict(li),
             np.asarray(meta["frames"], dtype=np.int64),
             "csv",
         )
@@ -50,6 +54,7 @@ def _load_static_points_and_label_idx(
             ) from e
         labels = [str(lab).strip() for lab in d["labels"]]
         col_by_name = {lab: j for j, lab in enumerate(labels) if lab and not lab.startswith("*")}
+        s_idx_all = dict(col_by_name)
         s_idx: dict[str, int] = {}
         for name in dynamic_label_to_idx:
             nn = str(name).strip()
@@ -64,7 +69,7 @@ def _load_static_points_and_label_idx(
         n_frames = int(pts.shape[0])
         ff = int(d.get("first_frame", 1))
         frames = np.arange(ff, ff + n_frames, dtype=np.int64)
-        return pts, s_idx, frames, "c3d"
+        return pts, s_idx, s_idx_all, frames, "c3d"
     raise ValueError(
         f"Static reference path must be a labeled .csv or .c3d file, not {path.suffix!r} ({path})"
     )
@@ -84,7 +89,7 @@ def load_static_reference_bundle(
     Returns keys: ``reference``, ``warnings``, ``two_marker_offsets`` (seg -> target -> tuple),
     ``pelvis_psi_offset`` (mean body offset for LPSI/RPSI from static), ``shoulder_local``.
     """
-    static_points, s_idx, frames, fmt = _load_static_points_and_label_idx(
+    static_points, s_idx, s_idx_all, frames, fmt = _load_static_points_and_label_idx(
         static_csv, dynamic_label_to_idx
     )
     bf_path = bestframe_sidecar_path(static_csv) if fmt == "csv" else None
@@ -107,10 +112,12 @@ def load_static_reference_bundle(
     warnings = list(warnings) + [f"static_reference_loaded_from_{fmt}"]
 
     vert = np.array(lab_vertical, dtype=np.float64)
-    two_marker: dict[str, dict[str, tuple[np.ndarray, np.ndarray, str, str]]] = {}
+    two_marker: dict[str, dict[str, tuple]] = {}
     for seg, names in segment_markers_dict.items():
-        seg_names = [str(x).strip() for x in names if str(x).strip() in s_idx]
-        offs = static_offsets_for_three_marker_segment(static_points, s_idx, seg_names, vert)
+        seg_names = unique_segment_markers(names)
+        offs = static_offsets_for_three_marker_segment(
+            static_points, s_idx_all, seg_names, vert
+        )
         if offs:
             two_marker[str(seg)] = offs
 

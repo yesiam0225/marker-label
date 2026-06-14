@@ -76,3 +76,26 @@ def test_gap_fill_with_static_csv(tmp_path: Path) -> None:
     res = gap_fill(str(dynamic), str(out), seg, static_csv_path=str(static), config=dict(DEFAULT_GAP_FILLING_CONFIG))
     assert res["quality"]["reference_source"] == "static"
     assert Path(out).is_file()
+
+
+def test_gap_fill_synthesizes_missing_lhee_column(tmp_path: Path) -> None:
+    static = tmp_path / "static.csv"
+    dynamic = tmp_path / "dyn.csv"
+    out = tmp_path / "out.csv"
+    static.write_text(
+        "frame,time,LANK_x,LANK_y,LANK_z,LTOE_x,LTOE_y,LTOE_z,LHEE_x,LHEE_y,LHEE_z,LTIB_x,LTIB_y,LTIB_z\n"
+        "0,0,0,0,0,100,0,0,20,-50,0,30,80,0\n"
+    )
+    rows = ["frame,time,LANK_x,LANK_y,LANK_z,LTOE_x,LTOE_y,LTOE_z,LTIB_x,LTIB_y,LTIB_z\n"]
+    for f in range(5):
+        rows.append(f"{f},{f*0.01},10,0,{f},110,0,{f},40,80,{f}\n")
+    dynamic.write_text("".join(rows))
+
+    seg = {"L_Foot": ["LANK", "LHEE", "LTOE", "LANK"]}
+    gap_fill(str(dynamic), str(out), seg, static_csv_path=str(static), config=dict(DEFAULT_GAP_FILLING_CONFIG))
+
+    import pandas as pd
+
+    df = pd.read_csv(out)
+    assert "LHEE_x" in df.columns
+    assert df["LHEE_x"].notna().all()
