@@ -1,14 +1,17 @@
 """
 Synthesize missing RHEE from RANK and RTOE using right-foot geometry from a labeled static CSV.
 
-Uses an ankle--toe axis and a lab vertical (default Y-up) to build a right-handed foot basis;
-static trial fixes the heel offset in that basis.
+Foot geometry uses ankle, toe, and tibia (when available): x along ankle→toe, y toward tibia
+(shin axis in the foot plane), z completing a right-handed basis. Static trial fixes the heel
+offset in that basis.
 
 Limitations
 -------------
-- Assumes the foot does not invert relative to the static ``heel - ankle`` half-space used
-  to flip the basis; large body turns or extreme foot roll can bias the heel.
-- ``--vertical`` must not be parallel to the ankle-toe segment on typical frames.
+- Assumes the foot does not invert relative to the static medial reference (ankle–tibia
+  direction when available) used to orient the basis; large body turns or extreme foot roll
+  can bias the heel.
+- ``--vertical`` must not be parallel to the ankle-toe segment on typical frames when
+  tibia markers are missing (falls back to lab vertical).
 """
 
 from __future__ import annotations
@@ -32,39 +35,121 @@ def _unit(v: np.ndarray) -> np.ndarray:
     return v / n
 
 
+def ankle_tibia_name(ankle_name: str) -> str:
+    """``LANK`` -> ``LTIB``, ``RANK`` -> ``RTIB``."""
+    s = str(ankle_name).strip()
+    if s.endswith("ANK"):
+        return s[:-3] + "TIB"
+    raise ValueError(f"Expected an ankle marker name (*ANK), got {ankle_name!r}")
+
+
+def shin_axis_ankle_toe_tibia(
+    ankle: np.ndarray,
+    toe: np.ndarray,
+    tibia: np.ndarray,
+) -> np.ndarray | None:
+    """
+    Ankle→tibia direction with the ankle→toe component removed (shin in the foot plane).
+
+    Returns ``None`` when tibia is colinear with the ankle-toe axis.
+    """
+    ank = np.asarray(ankle, dtype=np.float64).reshape(3)
+    t = np.asarray(toe, dtype=np.float64).reshape(3)
+    ti = np.asarray(tibia, dtype=np.float64).reshape(3)
+    x_ax = _unit(t - ank)
+    shin = ti - ank - float(np.dot(ti - ank, x_ax)) * x_ax
+    n = float(np.linalg.norm(shin))
+    if n < 1e-9:
+        return None
+    return shin / n
+
+
+def medial_reference_ankle_toe_tibia(
+    ankle: np.ndarray,
+    toe: np.ndarray,
+    tibia: np.ndarray,
+) -> np.ndarray | None:
+    """
+    Unit vector in the plane perpendicular to ankle-toe, from ankle toward tibia (medial).
+
+    Foot lateral/medial is defined relative to the shin marker, not lab Y or body center.
+    Returns ``None`` when tibia is colinear with the ankle-toe axis.
+    """
+    ank = np.asarray(ankle, dtype=np.float64).reshape(3)
+    t = np.asarray(toe, dtype=np.float64).reshape(3)
+    ti = np.asarray(tibia, dtype=np.float64).reshape(3)
+    x_ax = _unit(t - ank)
+    med = ti - ank - float(np.dot(ti - ank, x_ax)) * x_ax
+    n = float(np.linalg.norm(med))
+    if n < 1e-9:
+        return None
+    return med / n
+
+
 def foot_basis_from_ankle_toe(
     ankle: np.ndarray,
     toe: np.ndarray,
     lab_vertical: np.ndarray,
     *,
+    tibia: np.ndarray | None = None,
     z_flip_reference: np.ndarray | None = None,
+    shin_axis_reference: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Orthonormal right-handed basis (x, y, z) with origin at ankle.
 
-    x: along ankle -> toe. z: in the half-space chosen by ``z_flip_reference`` (heel side).
-    y: z x x (right-handed).
+    x: along ankle -> toe.
+    When ``tibia`` is given, y follows the shin axis (ankle -> tibia, perpendicular to x) and
+    z = x x y (mediolateral completion). Mediolateral sign is fixed with ``z_flip_reference``
+    when provided (typically the static ankle-tibia medial direction).
+    ``shin_axis_reference`` locks the shin (y) hemisphere to static when dynamic tibia geometry
+    is near-degenerate during obstacle clearance.
+    Without tibia, falls back to lab vertical for the foot plane.
     """
     g = np.asarray(lab_vertical, dtype=np.float64).reshape(3)
     g = _unit(g)
     ank = np.asarray(ankle, dtype=np.float64).reshape(3)
     t = np.asarray(toe, dtype=np.float64).reshape(3)
     x_ax = _unit(t - ank)
-    v_perp = g - float(np.dot(g, x_ax)) * x_ax
-    nv = float(np.linalg.norm(v_perp))
-    if nv < 1e-9:
-        alt = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        v_perp = alt - float(np.dot(alt, x_ax)) * x_ax
+    used_tibia = False
+    shin_ref_u: np.ndarray | None = None
+    if shin_axis_reference is not None:
+        sr = np.asarray(shin_axis_reference, dtype=np.float64).reshape(3)
+        sn = float(np.linalg.norm(sr))
+        if sn >= 1e-9:
+            shin_ref_u = sr / sn
+    if tibia is not None:
+        shin_y = shin_axis_ankle_toe_tibia(ank, t, tibia)
+        if shin_y is not None:
+            used_tibia = True
+            if shin_ref_u is not None and float(np.dot(shin_y, shin_ref_u)) < 0.0:
+                shin_y = -shin_y
+            y_ax = shin_y
+            z_ax = _unit(np.cross(x_ax, y_ax))
+            y_ax = np.cross(z_ax, x_ax)
+    if not used_tibia:
+        v_perp = g - float(np.dot(g, x_ax)) * x_ax
         nv = float(np.linalg.norm(v_perp))
         if nv < 1e-9:
-            raise ValueError("Cannot build perpendicular to ankle-toe axis (degenerate with lab vertical)")
-    v_perp = v_perp / nv
-    z_ax = _unit(np.cross(x_ax, v_perp))
-    y_ax = np.cross(z_ax, x_ax)
+            alt = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            v_perp = alt - float(np.dot(alt, x_ax)) * x_ax
+            nv = float(np.linalg.norm(v_perp))
+            if nv < 1e-9:
+                raise ValueError(
+                    "Cannot build perpendicular to ankle-toe axis (degenerate with lab vertical)"
+                )
+        v_perp = v_perp / nv
+        z_ax = _unit(np.cross(x_ax, v_perp))
+        y_ax = np.cross(z_ax, x_ax)
     if z_flip_reference is not None:
         ref = np.asarray(z_flip_reference, dtype=np.float64).reshape(3)
         if float(np.dot(z_ax, ref)) < 0.0:
             z_ax = -z_ax
+            y_ax = np.cross(z_ax, x_ax)
+    if shin_ref_u is not None and used_tibia:
+        if float(np.dot(y_ax, shin_ref_u)) < 0.0:
+            y_ax = -y_ax
+            z_ax = _unit(np.cross(x_ax, y_ax))
             y_ax = np.cross(z_ax, x_ax)
     return x_ax, y_ax, z_ax
 
@@ -77,21 +162,22 @@ def static_rhee_coefficients(
     rank_name: str = "RANK",
     rtoe_name: str = "RTOE",
     rhee_name: str = "RHEE",
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """
-    Mean ankle/toe/heel over frames where all three are finite; return (coeffs, heel_side_ref).
+    Mean ankle/toe/heel (and tibia when present) over finite frames; return
+    ``(coeffs, heel_side_ref, shin_axis_ref)``.
 
     coeffs are (3,) such that RHEE ≈ RANK + c0*x + c1*y + c2*z with basis built from mean
-    ankle and mean toe (same basis used to express coeffs).
+    ankle, mean toe, and mean tibia when available.
     """
-    ri, ti, hi = label_to_idx[rank_name], label_to_idx[rtoe_name], label_to_idx[rhee_name]
+    ri, toe_i, hi = label_to_idx[rank_name], label_to_idx[rtoe_name], label_to_idx[rhee_name]
     n = points.shape[0]
     acc_a = []
     acc_t = []
     acc_h = []
     for f in range(n):
         a = points[f, ri, :]
-        t = points[f, ti, :]
+        t = points[f, toe_i, :]
         h = points[f, hi, :]
         if np.isfinite(a).all() and np.isfinite(t).all() and np.isfinite(h).all():
             acc_a.append(a)
@@ -104,12 +190,48 @@ def static_rhee_coefficients(
     ank_m = np.mean(np.stack(acc_a, axis=0), axis=0)
     toe_m = np.mean(np.stack(acc_t, axis=0), axis=0)
     heel_m = np.mean(np.stack(acc_h, axis=0), axis=0)
-    x_ax, y_ax, z_ax = foot_basis_from_ankle_toe(ank_m, toe_m, lab_vertical, z_flip_reference=None)
+    tib_name = ankle_tibia_name(rank_name)
+    tib_m: np.ndarray | None = None
+    if tib_name in label_to_idx:
+        tib_i = label_to_idx[tib_name]
+        acc_tb: list[np.ndarray] = []
+        for f in range(n):
+            a = points[f, ri, :]
+            t = points[f, toe_i, :]
+            h = points[f, hi, :]
+            tb = points[f, tib_i, :]
+            if (
+                np.isfinite(a).all()
+                and np.isfinite(t).all()
+                and np.isfinite(h).all()
+                and np.isfinite(tb).all()
+            ):
+                acc_tb.append(tb)
+        if not acc_tb:
+            for f in range(n):
+                tb = points[f, tib_i, :]
+                if np.isfinite(tb).all():
+                    acc_tb.append(tb)
+        if acc_tb:
+            tib_m = np.mean(np.stack(acc_tb, axis=0), axis=0)
+    basis_kw: dict[str, Any] = {"z_flip_reference": None}
+    shin_ref: np.ndarray | None = None
+    if tib_m is not None:
+        shin_ref = shin_axis_ankle_toe_tibia(ank_m, toe_m, tib_m)
+        med_ref = medial_reference_ankle_toe_tibia(ank_m, toe_m, tib_m)
+        if med_ref is not None:
+            basis_kw["tibia"] = tib_m
+            basis_kw["z_flip_reference"] = med_ref
+            if shin_ref is not None:
+                basis_kw["shin_axis_reference"] = shin_ref
+    x_ax, y_ax, z_ax = foot_basis_from_ankle_toe(ank_m, toe_m, lab_vertical, **basis_kw)
     r = np.stack([x_ax, y_ax, z_ax], axis=1)
     rel = heel_m - ank_m
     coeffs = r.T @ rel
-    heel_side_ref = heel_m - ank_m
-    return coeffs, heel_side_ref
+    heel_side_ref = (
+        basis_kw["z_flip_reference"] if basis_kw["z_flip_reference"] is not None else heel_m - ank_m
+    )
+    return coeffs, heel_side_ref, shin_ref
 
 
 def predict_rhee_row(
@@ -118,12 +240,20 @@ def predict_rhee_row(
     coeffs: np.ndarray,
     lab_vertical: np.ndarray,
     heel_side_ref: np.ndarray,
+    *,
+    tibia_xyz: np.ndarray | None = None,
+    shin_axis_reference: np.ndarray | None = None,
 ) -> np.ndarray:
     """Single-frame RHEE position (3,) or NaN if inputs invalid."""
     if not (np.isfinite(rank_xyz).all() and np.isfinite(rtoe_xyz).all()):
         return np.full(3, np.nan, dtype=np.float64)
+    basis_kw: dict[str, Any] = {"z_flip_reference": heel_side_ref}
+    if shin_axis_reference is not None:
+        basis_kw["shin_axis_reference"] = shin_axis_reference
+    if tibia_xyz is not None and np.isfinite(tibia_xyz).all():
+        basis_kw["tibia"] = tibia_xyz
     x_ax, y_ax, z_ax = foot_basis_from_ankle_toe(
-        rank_xyz, rtoe_xyz, lab_vertical, z_flip_reference=heel_side_ref
+        rank_xyz, rtoe_xyz, lab_vertical, **basis_kw
     )
     r = np.stack([x_ax, y_ax, z_ax], axis=1)
     return rank_xyz + r @ coeffs
@@ -178,7 +308,7 @@ def synthesize_rhee_csv(
         if name not in meta_s["label_to_marker_idx"]:
             raise ValueError(f"Static CSV missing marker column {name!r}")
 
-    coeffs, heel_ref = static_rhee_coefficients(
+    coeffs, heel_ref, shin_ref = static_rhee_coefficients(
         meta_s["points"], meta_s["label_to_marker_idx"], vert
     )
 
@@ -202,6 +332,10 @@ def synthesize_rhee_csv(
 
     if "RANK" not in stem_to_triplet or "RTOE" not in stem_to_triplet:
         raise ValueError("Dynamic CSV must include RANK and RTOE marker triplets")
+
+    rtib_ix: tuple[int, int, int] | None = None
+    if "RTIB" in stem_to_triplet:
+        rtib_ix = stem_to_triplet["RTIB"]
 
     has_rhee = "RHEE" in stem_to_triplet
     rank_ix = stem_to_triplet["RANK"][0]
@@ -234,7 +368,19 @@ def synthesize_rhee_csv(
             except ValueError:
                 rank_xyz = np.full(3, np.nan, dtype=np.float64)
                 rtoe_xyz = np.full(3, np.nan, dtype=np.float64)
-            pred = predict_rhee_row(rank_xyz, rtoe_xyz, coeffs, vert, heel_ref)
+            tibia_xyz = None
+            if rtib_ix is not None:
+                try:
+                    tibia_xyz = np.array(
+                        [float(row[rtib_ix[0]]), float(row[rtib_ix[1]]), float(row[rtib_ix[2]])],
+                        dtype=np.float64,
+                    )
+                except ValueError:
+                    tibia_xyz = None
+            pred = predict_rhee_row(
+                rank_xyz, rtoe_xyz, coeffs, vert, heel_ref,
+                tibia_xyz=tibia_xyz, shin_axis_reference=shin_ref,
+            )
             head = row[:insert_at]
             tail = row[insert_at:]
             if np.isfinite(pred).all():
@@ -249,11 +395,21 @@ def synthesize_rhee_csv(
         pts = meta_d["points"]
         li = meta_d["label_to_marker_idx"]
         ri, ti, hi = li["RANK"], li["RTOE"], li["RHEE"]
+        tib_i = li.get("RTIB")
         for f in range(int(meta_d["n_frames"])):
             cur = pts[f, hi, :]
             if np.isfinite(cur).all():
                 continue
-            pred = predict_rhee_row(pts[f, ri, :], pts[f, ti, :], coeffs, vert, heel_ref)
+            tibia_xyz = pts[f, tib_i, :] if tib_i is not None else None
+            pred = predict_rhee_row(
+                pts[f, ri, :],
+                pts[f, ti, :],
+                coeffs,
+                vert,
+                heel_ref,
+                tibia_xyz=tibia_xyz,
+                shin_axis_reference=shin_ref,
+            )
             if np.isfinite(pred).all():
                 pts[f, hi, :] = pred
         _sync_data_rows_from_points(meta_d)

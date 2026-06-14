@@ -9,7 +9,7 @@ import numpy as np
 from marker_label.trial_trim import kabsch
 
 from .segment_utils import min_visible_others_for_segment, segment_uses_two_marker_rigid
-from .two_marker_static import pick_two_anchor_markers, predict_from_two_anchors
+from .two_marker_static import pick_two_anchor_markers, predict_from_two_anchors, unpack_two_marker_pack, _foot_tibia_for_marker
 
 
 def _confidence_from_residual(max_res: float, cfg: Mapping) -> str:
@@ -115,7 +115,7 @@ def rigid_body_fill(
             res = np.linalg.norm(recon - p_cur, axis=1)
             max_res = float(np.max(res))
         elif len(used) == 2 and two_pack is not None:
-            off, flip, o_m, x_m = two_pack
+            off, flip, shin_ref, o_m, x_m = unpack_two_marker_pack(two_pack)
             pair = pick_two_anchor_markers(seg_names, mk, used)
             if pair is None:
                 max_res = np.nan
@@ -123,12 +123,17 @@ def rigid_body_fill(
             else:
                 a_m, b_m = pair
                 mi_a, mi_b = label_to_idx[a_m], label_to_idx[b_m]
+                ank_pt, toe_pt = _foot_ankle_toe_pts(points, f, label_to_idx, mk)
                 pred = predict_from_two_anchors(
                     points[f, mi_a, :],
                     points[f, mi_b, :],
                     off,
                     vert,
                     flip,
+                    tibia_pt=_tibia_pt_for_foot_marker(points, f, label_to_idx, mk),
+                    foot_ankle_pt=ank_pt,
+                    foot_toe_pt=toe_pt,
+                    shin_axis_reference=shin_ref,
                 )
                 max_res = 0.0 if np.isfinite(pred).all() else np.nan
             used = list(used)
@@ -187,6 +192,43 @@ def rigid_body_fill(
             )
         )
     return out
+
+
+def _tibia_pt_for_foot_marker(
+    points: np.ndarray,
+    frame: int,
+    label_to_idx: Mapping[str, int],
+    marker: str,
+) -> np.ndarray | None:
+    tib_name = _foot_tibia_for_marker(marker)
+    if not tib_name or tib_name not in label_to_idx:
+        return None
+    pt = points[frame, label_to_idx[tib_name], :]
+    if not np.isfinite(pt).all():
+        return None
+    return np.asarray(pt, dtype=np.float64)
+
+
+def _foot_ankle_toe_pts(
+    points: np.ndarray,
+    frame: int,
+    label_to_idx: Mapping[str, int],
+    marker: str,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    m = str(marker).strip()
+    if m.startswith("L"):
+        ank_name, toe_name = "LANK", "LTOE"
+    elif m.startswith("R"):
+        ank_name, toe_name = "RANK", "RTOE"
+    else:
+        return None, None
+    if ank_name not in label_to_idx or toe_name not in label_to_idx:
+        return None, None
+    ank = points[frame, label_to_idx[ank_name], :]
+    toe = points[frame, label_to_idx[toe_name], :]
+    if not (np.isfinite(ank).all() and np.isfinite(toe).all()):
+        return None, None
+    return np.asarray(ank, dtype=np.float64), np.asarray(toe, dtype=np.float64)
 
 
 def _row(

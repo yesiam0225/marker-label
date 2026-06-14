@@ -24,21 +24,22 @@ def test_foot_rhee_rigid_two_marker_with_static(tmp_path: Path) -> None:
     static = tmp_path / "static.csv"
     dynamic = tmp_path / "dyn.csv"
     static.write_text(
-        "frame,time,RANK_x,RANK_y,RANK_z,RTOE_x,RTOE_y,RTOE_z,RHEE_x,RHEE_y,RHEE_z\n"
-        "0,0,0,0,0,100,0,0,20,-50,0\n"
+        "frame,time,RANK_x,RANK_y,RANK_z,RTOE_x,RTOE_y,RTOE_z,RHEE_x,RHEE_y,RHEE_z,RTIB_x,RTIB_y,RTIB_z\n"
+        "0,0,0,0,0,100,0,0,20,-50,0,30,80,0\n"
     )
-    rows_dyn = ["frame,time,RANK_x,RANK_y,RANK_z,RTOE_x,RTOE_y,RTOE_z,RHEE_x,RHEE_y,RHEE_z\n"]
+    rows_dyn = ["frame,time,RANK_x,RANK_y,RANK_z,RTOE_x,RTOE_y,RTOE_z,RHEE_x,RHEE_y,RHEE_z,RTIB_x,RTIB_y,RTIB_z\n"]
     for f in range(n):
-        rows_dyn.append(f"{f},{f*0.01},10,0,{f},110,0,{f},,,,\n")
+        rows_dyn.append(f"{f},{f*0.01},10,0,{f},110,0,{f},,,,40,80,{f}\n")
     dynamic.write_text("".join(rows_dyn))
 
     seg = {"R_Foot": ["RANK", "RHEE", "RTOE", "RANK"]}
     bundle = load_static_reference_bundle(static, seg, {"RANK": 0, "RTOE": 1, "RHEE": 2})
-    pts = np.full((n, 3, 3), np.nan)
+    pts = np.full((n, 4, 3), np.nan)
     for f in range(n):
         pts[f, 0, :] = [10, 0, float(f)]
         pts[f, 1, :] = [110, 0, float(f)]
-    label_to_idx = {"RANK": 0, "RTOE": 1, "RHEE": 2}
+        pts[f, 3, :] = [40, 80, float(f)]
+    label_to_idx = {"RANK": 0, "RTOE": 1, "RHEE": 2, "RTIB": 3}
     gap = (5, 9, 5)
     cfg = dict(DEFAULT_GAP_FILLING_CONFIG)
     cat, seg_n = categorize_gap("RHEE", gap, pts, label_to_idx, seg, ("LPSI", "RPSI"), ("LASI", "RASI"), cfg)
