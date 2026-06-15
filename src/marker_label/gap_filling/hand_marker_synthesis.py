@@ -381,6 +381,104 @@ def _forearm_scale_factor(
     return dynamic_wra / static_wra
 
 
+def _forearm_wrist_basis(
+    frm: np.ndarray,
+    wra: np.ndarray,
+    lab_vertical: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Segment frame from forearm axis (FRM→WRA) and lab-up; no FIN required."""
+    origin = np.asarray(frm, dtype=np.float64)
+    x_ax = _unit(wra - frm)
+    if x_ax is None:
+        return None
+    g = _unit(lab_vertical)
+    if g is None:
+        return None
+    z_ax = np.cross(x_ax, g)
+    z_ax = z_ax - float(np.dot(z_ax, x_ax)) * x_ax
+    z_u = _unit(z_ax)
+    if z_u is None:
+        z_u = _unit(np.cross(g, x_ax))
+        if z_u is None:
+            return None
+    y_ax = np.cross(z_u, x_ax)
+    y_ax = y_ax / float(np.linalg.norm(y_ax))
+    basis = np.stack([x_ax, y_ax, z_u], axis=1)
+    return origin, basis
+
+
+def _static_mirrored_wrb_forearm_local(
+    opp_ctx: HandSideStaticContext,
+    lab_vertical: np.ndarray,
+) -> np.ndarray | None:
+    """Opposite-side static WRB in forearm frame, mirrored for contralateral placement."""
+    frm = opp_ctx.static_means[opp_ctx.frm]
+    wra = opp_ctx.static_means[opp_ctx.wra]
+    wrb = opp_ctx.static_means[opp_ctx.wrb]
+    fb = _forearm_wrist_basis(frm, wra, lab_vertical)
+    if fb is None:
+        return None
+    origin, basis = fb
+    local = _global_to_local(wrb, origin, basis)
+    local[2] *= -1.0
+    return local
+
+
+def _apply_wrb_ap_lock(
+    pred: np.ndarray,
+    wra_pt: np.ndarray,
+    opp_ctx: HandSideStaticContext,
+    points_row: np.ndarray,
+    label_to_idx: Mapping[str, int],
+    lab_vertical: np.ndarray,
+) -> np.ndarray:
+    ap = _sagittal_ap_axis_from_row(points_row, label_to_idx, lab_vertical)
+    expected_ap = _static_wrb_ap_sign_on_row(
+        opp_ctx, points_row, label_to_idx, lab_vertical
+    )
+    if (
+        ap is not None
+        and expected_ap is not None
+        and abs(expected_ap) >= 1e-12
+        and float(np.dot(pred - wra_pt, ap)) * expected_ap < 0.0
+    ):
+        return _lock_wrb_sagittal_to_wra(pred, wra_pt, expected_ap, ap)
+    return pred
+
+
+def _place_mirrored_static_wrb_forearm_fallback(
+    points_row: np.ndarray,
+    label_to_idx: Mapping[str, int],
+    tgt_anchors: tuple[str, str, str],
+    opp_ctx: HandSideStaticContext,
+    lab_vertical: np.ndarray,
+) -> np.ndarray | None:
+    """Place WRB from FRM+WRA only when the FIN anchor is missing."""
+    frm_i = label_to_idx.get(tgt_anchors[0])
+    wra_i = label_to_idx.get(tgt_anchors[1])
+    if frm_i is None or wra_i is None:
+        return None
+    frm_pt = points_row[frm_i, :]
+    wra_pt = points_row[wra_i, :]
+    if not (np.isfinite(frm_pt).all() and np.isfinite(wra_pt).all()):
+        return None
+    local = _static_mirrored_wrb_forearm_local(opp_ctx, lab_vertical)
+    if local is None:
+        return None
+    scale = _forearm_scale_factor(opp_ctx, frm_pt, wra_pt)
+    local_scaled = np.asarray(local, dtype=np.float64) * scale
+    fb = _forearm_wrist_basis(frm_pt, wra_pt, lab_vertical)
+    if fb is None:
+        return None
+    origin, basis = fb
+    pred = _local_to_global(local_scaled, origin, basis)
+    if not np.isfinite(pred).all():
+        return None
+    return _apply_wrb_ap_lock(
+        pred, wra_pt, opp_ctx, points_row, label_to_idx, lab_vertical
+    )
+
+
 def _place_mirrored_static_wrb(
     points_row: np.ndarray,
     label_to_idx: Mapping[str, int],
@@ -413,7 +511,16 @@ def _place_mirrored_static_wrb(
         frame_y_reference=None,
     )
     if pred is None:
-        return None
+        pred = _place_mirrored_static_wrb_forearm_fallback(
+            points_row,
+            label_to_idx,
+            tgt_anchors,
+            opp_ctx,
+            lab_vertical,
+        )
+        if pred is None:
+            return None
+        return pred
     ap = _sagittal_ap_axis_from_row(points_row, label_to_idx, lab_vertical)
     expected_ap = _static_wrb_ap_sign_on_row(
         opp_ctx, points_row, label_to_idx, lab_vertical

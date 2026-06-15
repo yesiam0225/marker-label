@@ -106,6 +106,24 @@ def rigid_body_fill(
             continue
 
         if len(used) >= 3:
+            if mk not in ref_seg:
+                out.append(
+                    _row(
+                        fc,
+                        marker,
+                        "rigid_body",
+                        False,
+                        "",
+                        np.nan,
+                        np.nan,
+                        np.nan,
+                        np.nan,
+                        ";".join(used),
+                        length,
+                        "no_reference_marker",
+                    )
+                )
+                continue
             p_ref = np.stack(p_ref_list, axis=0)
             p_cur = np.stack(p_cur_list, axis=0)
             r, t = kabsch(p_ref, p_cur)
