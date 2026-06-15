@@ -47,6 +47,7 @@ _INSERT_AFTER: dict[str, tuple[str, ...]] = {
 @dataclass(frozen=True)
 class HandSideStaticContext:
     models: dict[str, tuple[tuple[str, str, str], np.ndarray]]
+    static_means: dict[str, np.ndarray]
     frm: str
     wra: str
     wrb: str
@@ -211,6 +212,7 @@ def _build_side_context(
     )
     return HandSideStaticContext(
         models=out,
+        static_means=means,
         frm=frm,
         wra=wra,
         wrb=wrb,
@@ -344,6 +346,136 @@ def _mirror_contralateral_local(local: np.ndarray, role_key: str) -> np.ndarray:
     return out
 
 
+def _mirrored_wrb_plane_sign(plane_sign: float) -> float:
+    """Deprecated: static-mirror WRB uses pelvis A/P sign from static opposite side."""
+    return -float(plane_sign)
+
+
+def _static_wrb_ap_sign_on_row(
+    opp_ctx: HandSideStaticContext,
+    points_row: np.ndarray,
+    label_to_idx: Mapping[str, int],
+    lab_vertical: np.ndarray,
+) -> float | None:
+    """Static opposite-side WRB–WRA A/P sign in the current frame's pelvis sagittal axis."""
+    ap = _sagittal_ap_axis_from_row(points_row, label_to_idx, lab_vertical)
+    if ap is None:
+        return None
+    wra_s = opp_ctx.static_means[opp_ctx.wra]
+    wrb_s = opp_ctx.static_means[opp_ctx.wrb]
+    return float(np.dot(wrb_s - wra_s, ap))
+
+
+def _forearm_scale_factor(
+    opp_ctx: HandSideStaticContext,
+    frm_pt: np.ndarray,
+    wra_pt: np.ndarray,
+) -> float:
+    """Dynamic/static forearm length ratio (|FRM-WRA|)."""
+    frm_s = opp_ctx.static_means[opp_ctx.frm]
+    wra_s = opp_ctx.static_means[opp_ctx.wra]
+    static_wra = float(np.linalg.norm(wra_s - frm_s))
+    dynamic_wra = float(np.linalg.norm(wra_pt - frm_pt))
+    if static_wra < 1e-12:
+        return 1.0
+    return dynamic_wra / static_wra
+
+
+def _place_mirrored_static_wrb(
+    points_row: np.ndarray,
+    label_to_idx: Mapping[str, int],
+    tgt_anchors: tuple[str, str, str],
+    opp_ctx: HandSideStaticContext,
+    local_mirrored: np.ndarray,
+    lab_vertical: np.ndarray,
+) -> np.ndarray | None:
+    """
+    Place WRB from mirrored static hand local coords scaled to dynamic forearm length.
+
+    Preserves static |FRM-WRB|, |WRA-WRB|, and |WRB-FIN| up to uniform forearm scaling
+    in the (FRM, WRA, FIN) frame. Does not use opposite-side frame_y_ref (would flip A/P).
+    """
+    frm_i = label_to_idx.get(tgt_anchors[0])
+    wra_i = label_to_idx.get(tgt_anchors[1])
+    if frm_i is None or wra_i is None:
+        return None
+    frm_pt = points_row[frm_i, :]
+    wra_pt = points_row[wra_i, :]
+    if not (np.isfinite(frm_pt).all() and np.isfinite(wra_pt).all()):
+        return None
+    scale = _forearm_scale_factor(opp_ctx, frm_pt, wra_pt)
+    local_scaled = np.asarray(local_mirrored, dtype=np.float64) * scale
+    pred = _predict_row(
+        points_row,
+        label_to_idx,
+        tgt_anchors,
+        local_scaled,
+        frame_y_reference=None,
+    )
+    if pred is None:
+        return None
+    ap = _sagittal_ap_axis_from_row(points_row, label_to_idx, lab_vertical)
+    expected_ap = _static_wrb_ap_sign_on_row(
+        opp_ctx, points_row, label_to_idx, lab_vertical
+    )
+    if (
+        ap is not None
+        and expected_ap is not None
+        and abs(expected_ap) >= 1e-12
+        and float(np.dot(pred - wra_pt, ap)) * expected_ap < 0.0
+    ):
+        local_flip = local_scaled.copy()
+        local_flip[2] *= -1.0
+        pred_flip = _predict_row(
+            points_row,
+            label_to_idx,
+            tgt_anchors,
+            local_flip,
+            frame_y_reference=None,
+        )
+        if pred_flip is not None and float(np.dot(pred_flip - wra_pt, ap)) * expected_ap >= 0.0:
+            pred = pred_flip
+        else:
+            pred = _lock_wrb_sagittal_to_wra(pred, wra_pt, expected_ap, ap)
+    return pred
+
+
+def _predict_from_static_mirrored_side(
+    points_row: np.ndarray,
+    label_to_idx: Mapping[str, int],
+    tgt_anchors: tuple[str, str, str],
+    opp_ctx: HandSideStaticContext,
+    src_marker: str,
+    role_key: str,
+    lab_vertical: np.ndarray,
+) -> np.ndarray | None:
+    """Predict a target-side marker from opposite-side static hand geometry (mirrored)."""
+    if src_marker not in opp_ctx.models:
+        return None
+    _, local_opp = opp_ctx.models[src_marker]
+    local = _mirror_contralateral_local(local_opp, role_key)
+    if role_key == "WRB":
+        frm_i = label_to_idx.get(tgt_anchors[0])
+        wra_i = label_to_idx.get(tgt_anchors[1])
+        if frm_i is None or wra_i is None:
+            return None
+        return _place_mirrored_static_wrb(
+            points_row,
+            label_to_idx,
+            tgt_anchors,
+            opp_ctx,
+            local,
+            lab_vertical,
+        )
+    return _predict_row(
+        points_row,
+        label_to_idx,
+        tgt_anchors,
+        local,
+        frame_y_reference=opp_ctx.frame_y_ref,
+    )
+
+
 def synthesize_hand_from_contralateral(
     meta: dict[str, Any],
     segment_markers_dict: Mapping[str, Sequence[str]],
@@ -360,7 +492,9 @@ def synthesize_hand_from_contralateral(
     the static trial. When ``static_csv_path`` is set and that side's static
     reference builds successfully, contralateral synthesis is skipped for that side.
 
-    WRB uses sagittal A/P lock from the source side when pelvis markers exist.
+    WRB uses sagittal A/P lock from the source side when pelvis markers exist and only
+    dynamic opposite-side geometry is available. When the static trial has the opposite
+    hand, mirrored static forearm geometry is used instead (preserves FRM–WRB vs FRM–WRA).
     """
     vert = np.asarray(lab_vertical, dtype=np.float64)
     label_to_idx = meta["label_to_marker_idx"]
@@ -389,6 +523,8 @@ def synthesize_hand_from_contralateral(
         if not hand_markers.intersection({roles["WRA"], roles["WRB"], roles["FIN"]}):
             continue
 
+        opp_ctx = static_side_ctx.get(opp)
+
         for role_key, anchor_roles in _FRAME_ANCHORS.items():
             tgt = roles[role_key]
             src = opp_roles[role_key]
@@ -401,46 +537,69 @@ def synthesize_hand_from_contralateral(
                 label_to_idx = meta["label_to_marker_idx"]
                 points = meta["points"]
 
-            if src not in label_to_idx:
+            if src not in label_to_idx and (
+                opp_ctx is None or src not in opp_ctx.models
+            ):
                 continue
             mi = label_to_idx[tgt]
 
             for f in range(points.shape[0]):
                 if np.isfinite(points[f, mi, :]).all():
                     continue
-                local = _local_of_marker(points[f], label_to_idx, src, src_anchors)
-                if local is None:
-                    continue
-                mirrored = _mirror_contralateral_local(local, role_key)
-                if role_key == "WRB":
-                    src_wra_i = label_to_idx.get(opp_roles["WRA"])
-                    src_wrb_i = label_to_idx.get(opp_roles["WRB"])
-                    tgt_wra_i = label_to_idx.get(roles["WRA"])
-                    pred = _predict_row(points[f], label_to_idx, tgt_anchors, mirrored)
-                    if pred is None:
+                if opp_ctx is not None and src in opp_ctx.models:
+                    pred = _predict_from_static_mirrored_side(
+                        points[f],
+                        label_to_idx,
+                        tgt_anchors,
+                        opp_ctx,
+                        src,
+                        role_key,
+                        vert,
+                    )
+                    reason = "contralateral_static_mirror"
+                    source_markers = ";".join(tgt_anchors) + ";static_" + opp
+                else:
+                    if src not in label_to_idx:
                         continue
-                    ap = _sagittal_ap_axis_from_row(points[f], label_to_idx, vert)
-                    if (
-                        ap is not None
-                        and src_wra_i is not None
-                        and src_wrb_i is not None
-                        and tgt_wra_i is not None
-                        and np.isfinite(points[f, src_wrb_i, :]).all()
-                    ):
-                        expected_sign = float(
-                            np.dot(
-                                points[f, src_wrb_i, :] - points[f, src_wra_i, :],
+                    local = _local_of_marker(points[f], label_to_idx, src, src_anchors)
+                    if local is None:
+                        continue
+                    mirrored = _mirror_contralateral_local(local, role_key)
+                    if role_key == "WRB":
+                        src_wra_i = label_to_idx.get(opp_roles["WRA"])
+                        src_wrb_i = label_to_idx.get(opp_roles["WRB"])
+                        tgt_wra_i = label_to_idx.get(roles["WRA"])
+                        pred = _predict_row(
+                            points[f], label_to_idx, tgt_anchors, mirrored
+                        )
+                        if pred is None:
+                            continue
+                        ap = _sagittal_ap_axis_from_row(points[f], label_to_idx, vert)
+                        if (
+                            ap is not None
+                            and src_wra_i is not None
+                            and src_wrb_i is not None
+                            and tgt_wra_i is not None
+                            and np.isfinite(points[f, src_wrb_i, :]).all()
+                        ):
+                            expected_sign = float(
+                                np.dot(
+                                    points[f, src_wrb_i, :] - points[f, src_wra_i, :],
+                                    ap,
+                                )
+                            )
+                            pred = _lock_wrb_sagittal_to_wra(
+                                pred,
+                                points[f, tgt_wra_i, :],
+                                expected_sign,
                                 ap,
                             )
+                    else:
+                        pred = _predict_row(
+                            points[f], label_to_idx, tgt_anchors, mirrored
                         )
-                        pred = _lock_wrb_sagittal_to_wra(
-                            pred,
-                            points[f, tgt_wra_i, :],
-                            expected_sign,
-                            ap,
-                        )
-                else:
-                    pred = _predict_row(points[f], label_to_idx, tgt_anchors, mirrored)
+                    reason = "contralateral_hand_mirror"
+                    source_markers = ";".join(src_anchors) + ";" + src
                 if pred is None:
                     continue
                 points[f, mi, :] = pred
@@ -450,14 +609,14 @@ def synthesize_hand_from_contralateral(
                         "marker": tgt,
                         "method": "contralateral_hand",
                         "success": True,
-                        "confidence": "MEDIUM",
+                        "confidence": "HIGH" if opp_ctx is not None else "MEDIUM",
                         "predicted_x": float(pred[0]),
                         "predicted_y": float(pred[1]),
                         "predicted_z": float(pred[2]),
                         "fit_residual_mm": 0.0,
-                        "source_markers": ";".join(src_anchors) + ";" + src,
+                        "source_markers": source_markers,
                         "gap_length": int(points.shape[0]),
-                        "reason": "contralateral_hand_mirror",
+                        "reason": reason,
                     }
                 )
     return fills
@@ -512,11 +671,21 @@ def synthesize_missing_hand_markers(
                 if np.isfinite(points[f, mi, :]).all():
                     continue
                 if marker == ctx.wrb:
+                    frm_i = label_to_idx.get(ctx.frm)
+                    wra_i = label_to_idx.get(ctx.wra)
+                    local_use = np.asarray(local, dtype=np.float64)
+                    if frm_i is not None and wra_i is not None:
+                        scale = _forearm_scale_factor(
+                            ctx,
+                            points[f, frm_i, :],
+                            points[f, wra_i, :],
+                        )
+                        local_use = local_use * scale
                     pred = _predict_wrb_row(
                         points[f],
                         label_to_idx,
                         anchors,
-                        local,
+                        local_use,
                         expected_plane_sign=ctx.wrb_plane_sign,
                         lab_vertical=vert,
                         frame_y_reference=ctx.frame_y_ref,

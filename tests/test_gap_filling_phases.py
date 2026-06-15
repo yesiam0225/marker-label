@@ -331,8 +331,100 @@ def test_contralateral_used_when_static_lacks_side_hand(tmp_path: Path) -> None:
     lwrb = fills[fills["marker"] == "LWRB"]
     assert not lwrb.empty
     assert (lwrb["method"] == "contralateral_hand").all()
+    assert (lwrb["reason"] == "contralateral_static_mirror").all()
     rwrb = fills[fills["marker"] == "RWRB"]
     assert rwrb.empty or (rwrb["method"] == "static_hand_forearm").all()
+
+
+def test_contralateral_lwrb_preserves_static_wra_wrb_distance(tmp_path: Path) -> None:
+    """LWRB from mirrored static R hand keeps forearm-scaled |WRA-WRB|."""
+    static = tmp_path / "static.csv"
+    dynamic = tmp_path / "dyn.csv"
+    out = tmp_path / "out.csv"
+    static.write_text(
+        "frame,time,RFRM_x,RFRM_y,RFRM_z,RWRA_x,RWRA_y,RWRA_z,RWRB_x,RWRB_y,RWRB_z,RFIN_x,RFIN_y,RFIN_z\n"
+        "0,0,0,400,900,200,350,650,180,340,620,250,380,500\n"
+    )
+    rows = [
+        "frame,time,LFRM_x,LFRM_y,LFRM_z,LWRA_x,LWRA_y,LWRA_z,LFIN_x,LFIN_y,LFIN_z\n"
+    ]
+    for f in range(3):
+        rows.append(
+            f"{f},{f*0.01},"
+            f"{f},{400+f},{900+f},"
+            f"{200+f},{350+f},{650+f},"
+            f"{250+f},{380+f},{500+f}\n"
+        )
+    dynamic.write_text("".join(rows))
+    seg = {"L_Hand": ["LWRA", "LWRB", "LFIN"]}
+    cfg = dict(DEFAULT_GAP_FILLING_CONFIG)
+    cfg["synthesize_missing_foot_heels"] = False
+    gap_fill(str(dynamic), str(out), seg, static_csv_path=str(static), config=cfg)
+
+    import numpy as np
+    import pandas as pd
+
+    static_df = pd.read_csv(static)
+    s = static_df.iloc[0]
+    static_wra_wrb = float(
+        np.linalg.norm([s.RWRB_x - s.RWRA_x, s.RWRB_y - s.RWRA_y, s.RWRB_z - s.RWRA_z])
+    )
+    static_frm_wra = float(
+        np.linalg.norm([s.RWRA_x - s.RFRM_x, s.RWRA_y - s.RFRM_y, s.RWRA_z - s.RFRM_z])
+    )
+    df = pd.read_csv(out)
+    row = df.iloc[0]
+    dynamic_frm_wra = float(
+        np.linalg.norm([row.LWRA_x - row.LFRM_x, row.LWRA_y - row.LFRM_y, row.LWRA_z - row.LFRM_z])
+    )
+    dynamic_wra_wrb = float(
+        np.linalg.norm([row.LWRB_x - row.LWRA_x, row.LWRB_y - row.LWRA_y, row.LWRB_z - row.LWRA_z])
+    )
+    dynamic_frm_wrb = float(
+        np.linalg.norm([row.LWRB_x - row.LFRM_x, row.LWRB_y - row.LFRM_y, row.LWRB_z - row.LFRM_z])
+    )
+    target_wra_wrb = static_wra_wrb * (dynamic_frm_wra / static_frm_wra)
+    target_frm_wrb = float(
+        np.linalg.norm([s.RWRB_x - s.RFRM_x, s.RWRB_y - s.RFRM_y, s.RWRB_z - s.RFRM_z])
+    ) * (dynamic_frm_wra / static_frm_wra)
+    assert abs(dynamic_wra_wrb - target_wra_wrb) < 2.0
+    assert abs(dynamic_frm_wrb - target_frm_wrb) < 2.0
+
+
+def test_contralateral_static_mirror_lwrb_posterior_ap(tmp_path: Path) -> None:
+    """Mirrored static R WRB stays posterior to LWRA (pelvis A/P), BBA09-like."""
+    static = tmp_path / "static.csv"
+    dynamic = tmp_path / "dyn.csv"
+    out = tmp_path / "out.csv"
+    static.write_text(
+        "frame,time,RFRM_x,RFRM_y,RFRM_z,RWRA_x,RWRA_y,RWRA_z,RWRB_x,RWRB_y,RWRB_z,RFIN_x,RFIN_y,RFIN_z\n"
+        "0,0,-1235,34.6,985.5,-1167,88.4,825.4,-1230.2,48.6,816.2,-1174.7,41.3,761\n"
+    )
+    dynamic.write_text(
+        "frame,time,"
+        "LASI_x,LASI_y,LASI_z,RASI_x,RASI_y,RASI_z,"
+        "LFRM_x,LFRM_y,LFRM_z,LWRA_x,LWRA_y,LWRA_z,LFIN_x,LFIN_y,LFIN_z\n"
+        "160,1.6,"
+        "-1155.574,447.818,957.89,-1150.594,186.603,955.693,"
+        "-1135.8,565.8,964,-1093.2,508.7,849,-1078.1,556.5,783.3\n"
+    )
+    seg = {"L_Hand": ["LWRA", "LWRB", "LFIN"]}
+    cfg = dict(DEFAULT_GAP_FILLING_CONFIG)
+    cfg["synthesize_missing_foot_heels"] = False
+    gap_fill(str(dynamic), str(out), seg, static_csv_path=str(static), config=cfg)
+
+    import numpy as np
+    import pandas as pd
+
+    df = pd.read_csv(out)
+    row = df.iloc[0]
+    ml = np.array([row.RASI_x - row.LASI_x, row.RASI_y - row.LASI_y, row.RASI_z - row.LASI_z])
+    ml /= np.linalg.norm(ml)
+    ap = np.cross(ml, np.array([0.0, 1.0, 0.0]))
+    ap /= np.linalg.norm(ap)
+    lwra = np.array([row.LWRA_x, row.LWRA_y, row.LWRA_z])
+    lwrb = np.array([row.LWRB_x, row.LWRB_y, row.LWRB_z])
+    assert float(np.dot(lwrb - lwra, ap)) < 0.0
 
 
 def test_static_wrb_stays_posterior_to_wra(tmp_path: Path) -> None:
