@@ -40,9 +40,68 @@ def _finite_rows(pts: np.ndarray) -> np.ndarray:
     return np.isfinite(pts).all(axis=1)
 
 
+def _find_repo_root(start: Path) -> Path | None:
+    """Walk up from ``start`` for marker-label repo root (pyproject.toml + data/)."""
+    for base in (start, *start.parents):
+        if (base / "pyproject.toml").is_file() and (base / "data").is_dir():
+            return base
+        if (base / ".git").is_dir() and (base / "data").is_dir():
+            return base
+    return None
+
+
+def _repo_search_roots() -> list[Path]:
+    """Directories to search for repo root (cwd chain, then installed package)."""
+    roots: list[Path] = [Path.cwd()]
+    pkg_root = Path(__file__).resolve().parent
+    if pkg_root not in roots:
+        roots.append(pkg_root)
+    return roots
+
+
+def resolve_input_path(path: str | Path) -> Path:
+    """
+    Resolve a viewer input path.
+
+    Tries the path as given, then cwd-relative, then relative to the repo root
+    found by walking up from cwd or the installed package (so ``data/BBC03/...``
+    works from any working directory).
+    """
+    p = Path(path).expanduser()
+    if p.is_file():
+        return p.resolve()
+
+    candidates: list[Path] = []
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        candidates.append(Path.cwd() / p)
+        for start in _repo_search_roots():
+            repo = _find_repo_root(start)
+            if repo is not None:
+                candidates.append(repo / p)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        key = candidate.resolve() if candidate.exists() else candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
+            return candidate.resolve()
+
+    hint = f"  cwd: {Path.cwd()}"
+    for start in _repo_search_roots():
+        repo = _find_repo_root(start)
+        if repo is not None and not p.is_absolute():
+            hint += f"\n  repo root: {repo}\n  expected: {repo / p}"
+            break
+    raise FileNotFoundError(f"File not found: {path}\n{hint}")
+
+
 def load_data(path: str, scale_factor: float = 1.0) -> tuple[np.ndarray, list[str], float]:
     """Load C3D or labeled CSV; return (points n_frames,n_markers,3), labels, rate. Optionally scale coordinates by scale_factor (e.g. 1000 if file is in m)."""
-    path = Path(path)
+    path = resolve_input_path(path)
     suffix = path.suffix.lower()
     if suffix == ".c3d":
         from .io import load_c3d
@@ -92,6 +151,7 @@ def run_viewer(
     """
     from .segments import segment_lines_for_frame_by_segment, SEGMENT_COLORS, SEGMENTS
 
+    path = str(resolve_input_path(path))
     points, labels, rate = load_data(path, scale_factor=scale_factor)
     n_frames, n_markers, _ = points.shape
     if n_frames == 0 or n_markers == 0:

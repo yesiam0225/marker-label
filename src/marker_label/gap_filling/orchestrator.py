@@ -17,6 +17,10 @@ from marker_label.trial_trim import bestframe_sidecar_path, parse_labeled_csv
 from .asis_only_fill import asis_only_fill
 from .continuity_check import apply_continuity_check_to_fills, frame_column_to_row
 from .foot_heel_synthesis import qc_stems_from_meta, synthesize_missing_foot_heels
+from .hand_marker_synthesis import (
+    synthesize_hand_from_contralateral,
+    synthesize_missing_hand_markers,
+)
 from .gap_detection import categorize_gap, find_gaps
 from .quality import compute_quality_metrics
 from .reference import build_robust_reference
@@ -51,6 +55,8 @@ DEFAULT_GAP_FILLING_CONFIG: dict[str, Any] = {
     "shoulder_markers": ("LSHO", "RSHO"),
     "thorax_markers": ("C7", "CLAV", "RBAK"),
     "synthesize_missing_foot_heels": True,
+    "synthesize_missing_hand_markers": True,
+    "synthesize_hand_from_contralateral": True,
 }
 
 
@@ -184,6 +190,8 @@ def gap_fill(
         logger.warning("%s", w)
 
     heel_fills: list[dict[str, Any]] = []
+    hand_fills: list[dict[str, Any]] = []
+    contra_fills: list[dict[str, Any]] = []
     if static_csv_path and cfg.get("synthesize_missing_foot_heels", True):
         heel_fills = synthesize_missing_foot_heels(
             meta,
@@ -208,6 +216,56 @@ def gap_fill(
                 expanded[:, :points_before.shape[1], :] = points_before
                 points_before = expanded
 
+    if static_csv_path and cfg.get("synthesize_missing_hand_markers", True):
+        hand_fills = synthesize_missing_hand_markers(
+            meta,
+            segment_markers_dict,
+            static_csv_path,
+            frames,
+            label_to_idx,
+            lab_vertical,
+        )
+        if hand_fills:
+            logger.info(
+                "Synthesized %d missing hand marker positions (static_hand_forearm)",
+                len(hand_fills),
+            )
+            qc_stems = qc_stems_from_meta(meta)
+            label_to_idx = meta["label_to_marker_idx"]
+            if meta["points"].shape[1] > points_before.shape[1]:
+                expanded = np.full(
+                    (points_before.shape[0], meta["points"].shape[1], 3),
+                    np.nan,
+                    dtype=np.float64,
+                )
+                n_old = min(points_before.shape[1], expanded.shape[1])
+                expanded[:, :n_old, :] = points_before[:, :n_old, :]
+                points_before = expanded
+
+    if cfg.get("synthesize_hand_from_contralateral", True):
+        contra_fills = synthesize_hand_from_contralateral(
+            meta,
+            segment_markers_dict,
+            frames,
+            lab_vertical,
+        )
+        if contra_fills:
+            logger.info(
+                "Synthesized %d hand marker positions from contralateral side",
+                len(contra_fills),
+            )
+            qc_stems = qc_stems_from_meta(meta)
+            label_to_idx = meta["label_to_marker_idx"]
+            if meta["points"].shape[1] > points_before.shape[1]:
+                expanded = np.full(
+                    (points_before.shape[0], meta["points"].shape[1], 3),
+                    np.nan,
+                    dtype=np.float64,
+                )
+                n_old = min(points_before.shape[1], expanded.shape[1])
+                expanded[:, :n_old, :] = points_before[:, :n_old, :]
+                points_before = expanded
+
     initial_gaps: dict[str, list[tuple[int, int, int]]] = {}
     for stem in qc_stems:
         if stem not in label_to_idx:
@@ -217,6 +275,10 @@ def gap_fill(
 
     fills_map: dict[tuple[int, str], dict[str, Any]] = {}
     for r in heel_fills:
+        fills_map[(int(r["frame"]), str(r["marker"]).strip())] = dict(r)
+    for r in hand_fills:
+        fills_map[(int(r["frame"]), str(r["marker"]).strip())] = dict(r)
+    for r in contra_fills:
         fills_map[(int(r["frame"]), str(r["marker"]).strip())] = dict(r)
 
     # --- Pass 1: rigid (only gaps categorized as rigid on *initial* layout) ---
