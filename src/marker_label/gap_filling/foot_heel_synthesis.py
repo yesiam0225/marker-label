@@ -129,7 +129,7 @@ def synthesize_missing_foot_heels(
             label_to_idx = meta["label_to_marker_idx"]
             points = meta["points"]
 
-        off, flip, shin_ref, o_m, x_m = unpack_two_marker_pack(pack)
+        off, flip, shin_ref, o_m, x_m, kind = unpack_two_marker_pack(pack)
         ank_i = label_to_idx[ank]
         toe_i = label_to_idx[toe]
         tib_i = label_to_idx.get(tib)
@@ -165,6 +165,7 @@ def synthesize_missing_foot_heels(
                 foot_ankle_pt=points[f, ank_i, :],
                 foot_toe_pt=points[f, toe_i, :],
                 shin_axis_reference=shin_ref,
+                segment_kind=kind,
             )
             if not np.isfinite(pred).all():
                 continue

@@ -28,6 +28,7 @@ from .rigid_fill import rigid_body_fill
 from .shoulder_from_thorax import shoulder_from_thorax_fill
 from .spline_fill import spline_fill
 from .static_reference import load_static_reference_bundle
+from .two_marker_static import static_offsets_for_three_marker_segment
 from .visualization import plot_gap_fill_summary
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,13 @@ def gap_fill(
             csv_path=in_path,
             frames=frames,
         )
+        vert_arr = np.array(lab_vertical, dtype=np.float64)
+        for seg, names in segment_markers_dict.items():
+            offs = static_offsets_for_three_marker_segment(
+                meta["points"], label_to_idx, names, vert_arr
+            )
+            if offs:
+                two_marker_offsets[str(seg)] = offs
     for w in ref_warnings:
         logger.warning("%s", w)
 
@@ -248,6 +256,8 @@ def gap_fill(
             segment_markers_dict,
             frames,
             lab_vertical,
+            static_csv_path=static_csv_path,
+            dynamic_label_to_idx=label_to_idx,
         )
         if contra_fills:
             logger.info(

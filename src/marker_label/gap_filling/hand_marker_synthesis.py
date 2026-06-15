@@ -349,19 +349,38 @@ def synthesize_hand_from_contralateral(
     segment_markers_dict: Mapping[str, Sequence[str]],
     frames: np.ndarray,
     lab_vertical: Sequence[float],
+    *,
+    static_csv_path: str | None = None,
+    dynamic_label_to_idx: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fill missing hand markers using the opposite side's rigid hand geometry.
 
-    WRB uses a source-side posterior sign lock so WRB stays posterior to WRA.
+    Runs only for sides whose hand geometry (FRM/WRA/WRB/FIN) is unavailable in
+    the static trial. When ``static_csv_path`` is set and that side's static
+    reference builds successfully, contralateral synthesis is skipped for that side.
+
+    WRB uses sagittal A/P lock from the source side when pelvis markers exist.
     """
     vert = np.asarray(lab_vertical, dtype=np.float64)
     label_to_idx = meta["label_to_marker_idx"]
     points = meta["points"]
     fills: list[dict[str, Any]] = []
 
+    static_side_ctx: dict[str, HandSideStaticContext | None] = {}
+    if static_csv_path and dynamic_label_to_idx is not None:
+        static_points, _, s_idx_all, _, _ = _load_static_points_and_label_idx(
+            static_csv_path, dynamic_label_to_idx
+        )
+        for side_key in ("L", "R"):
+            static_side_ctx[side_key] = _build_side_context(
+                static_points, s_idx_all, side_key, vert
+            )
+
     for seg_name, side in _HAND_SEGMENTS:
         if seg_name not in segment_markers_dict:
+            continue
+        if static_side_ctx.get(side) is not None:
             continue
         hand_markers = set(unique_segment_markers(segment_markers_dict[seg_name]))
         roles = _role_names(side)

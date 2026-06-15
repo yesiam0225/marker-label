@@ -59,6 +59,42 @@ def test_foot_rhee_rigid_two_marker_with_static(tmp_path: Path) -> None:
     assert any(r["success"] for r in rows)
 
 
+def test_thigh_lthi_rigid_two_marker_uses_body_frame(tmp_path: Path) -> None:
+    static = tmp_path / "static.csv"
+    dynamic = tmp_path / "dyn.csv"
+    out = tmp_path / "out.csv"
+    static.write_text(
+        "frame,time,LASI_x,LASI_y,LASI_z,LTHI_x,LTHI_y,LTHI_z,LKNE_x,LKNE_y,LKNE_z\n"
+        "0,0,0,400,900,200,350,650,250,380,500\n"
+    )
+    rows = [
+        "frame,time,LASI_x,LASI_y,LASI_z,LTHI_x,LTHI_y,LTHI_z,LKNE_x,LKNE_y,LKNE_z\n"
+    ]
+    for f in range(5):
+        z = float(f)
+        rows.append(
+            f"{f},{f*0.01},"
+            f"{z},{400+z},{900+z},nan,nan,nan,"
+            f"{250+z},{380+z},{500+z}\n"
+        )
+    dynamic.write_text("".join(rows))
+
+    seg = {"L_Thigh": ["LASI", "LTHI", "LKNE"]}
+    cfg = dict(DEFAULT_GAP_FILLING_CONFIG)
+    cfg["synthesize_missing_foot_heels"] = False
+    cfg["synthesize_missing_hand_markers"] = False
+    cfg["synthesize_hand_from_contralateral"] = False
+    gap_fill(str(dynamic), str(out), seg, static_csv_path=str(static), config=cfg)
+
+    import pandas as pd
+
+    df = pd.read_csv(out)
+    row = df.iloc[0]
+    assert row["LTHI_z"] > row["LKNE_z"]
+    assert row["LTHI_z"] < row["LASI_z"]
+    assert abs(float(row["LTHI_y"]) - 350.0) < 80.0
+
+
 def test_gap_fill_with_static_csv(tmp_path: Path) -> None:
     static = tmp_path / "s.csv"
     dynamic = tmp_path / "d.csv"
@@ -230,6 +266,73 @@ def test_contralateral_lwrb_posterior_with_pelvis_ap(tmp_path: Path) -> None:
     rwrb = np.array([row.RWRB_x, row.RWRB_y, row.RWRB_z])
     assert float(np.dot(lwrb - lwra, ap)) < 0.0
     assert float(np.dot(rwrb - rwra, ap)) < 0.0
+
+
+def test_contralateral_skipped_when_static_has_side_hand(tmp_path: Path) -> None:
+    static = tmp_path / "static.csv"
+    dynamic = tmp_path / "dyn.csv"
+    out = tmp_path / "out.csv"
+    static.write_text(
+        "frame,time,LFRM_x,LFRM_y,LFRM_z,LWRA_x,LWRA_y,LWRA_z,LWRB_x,LWRB_y,LWRB_z,LFIN_x,LFIN_y,LFIN_z\n"
+        "0,0,0,0,0,10,0,0,12,0,-8,10,10,0\n"
+    )
+    dynamic.write_text(
+        "frame,time,LFRM_x,LFRM_y,LFRM_z,LWRA_x,LWRA_y,LWRA_z,LFIN_x,LFIN_y,LFIN_z\n"
+        "0,0,0,0,0,10,0,0,10,10,0\n"
+    )
+    seg = {"L_Hand": ["LWRA", "LWRB", "LFIN"]}
+    cfg = dict(DEFAULT_GAP_FILLING_CONFIG)
+    cfg["synthesize_missing_foot_heels"] = False
+    gap_fill(
+        str(dynamic),
+        str(out),
+        seg,
+        static_csv_path=str(static),
+        config=cfg,
+    )
+
+    import pandas as pd
+
+    fills = pd.read_csv(str(out).replace(".csv", "_fills.csv"))
+    assert (fills["marker"] == "LWRB").any()
+    assert (fills.loc[fills["marker"] == "LWRB", "method"] == "static_hand_forearm").all()
+    assert not (fills["method"] == "contralateral_hand").any()
+
+
+def test_contralateral_used_when_static_lacks_side_hand(tmp_path: Path) -> None:
+    static = tmp_path / "static.csv"
+    dynamic = tmp_path / "dyn.csv"
+    out = tmp_path / "out.csv"
+    static.write_text(
+        "frame,time,RFRM_x,RFRM_y,RFRM_z,RWRA_x,RWRA_y,RWRA_z,RWRB_x,RWRB_y,RWRB_z,RFIN_x,RFIN_y,RFIN_z\n"
+        "0,0,0,0,0,10,0,0,12,0,-8,10,10,0\n"
+    )
+    rows = [
+        "frame,time,"
+        "LFRM_x,LFRM_y,LFRM_z,LWRA_x,LWRA_y,LWRA_z,LFIN_x,LFIN_y,LFIN_z,"
+        "RFRM_x,RFRM_y,RFRM_z,RWRA_x,RWRA_y,RWRA_z,RWRB_x,RWRB_y,RWRB_z,RFIN_x,RFIN_y,RFIN_z\n"
+    ]
+    rows.append("0,0,0,0,0,-10,0,0,-10,10,0,0,0,0,10,0,0,12,0,-8,10,10,0\n")
+    dynamic.write_text("".join(rows))
+    seg = {"L_Hand": ["LWRA", "LWRB", "LFIN"], "R_Hand": ["RWRA", "RWRB", "RFIN"]}
+    cfg = dict(DEFAULT_GAP_FILLING_CONFIG)
+    cfg["synthesize_missing_foot_heels"] = False
+    gap_fill(
+        str(dynamic),
+        str(out),
+        seg,
+        static_csv_path=str(static),
+        config=cfg,
+    )
+
+    import pandas as pd
+
+    fills = pd.read_csv(str(out).replace(".csv", "_fills.csv"))
+    lwrb = fills[fills["marker"] == "LWRB"]
+    assert not lwrb.empty
+    assert (lwrb["method"] == "contralateral_hand").all()
+    rwrb = fills[fills["marker"] == "RWRB"]
+    assert rwrb.empty or (rwrb["method"] == "static_hand_forearm").all()
 
 
 def test_static_wrb_stays_posterior_to_wra(tmp_path: Path) -> None:

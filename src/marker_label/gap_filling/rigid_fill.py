@@ -115,7 +115,7 @@ def rigid_body_fill(
             res = np.linalg.norm(recon - p_cur, axis=1)
             max_res = float(np.max(res))
         elif len(used) == 2 and two_pack is not None:
-            off, flip, shin_ref, o_m, x_m = unpack_two_marker_pack(two_pack)
+            off, flip, shin_ref, o_m, x_m, kind = unpack_two_marker_pack(two_pack)
             pair = pick_two_anchor_markers(seg_names, mk, used)
             if pair is None:
                 max_res = np.nan
@@ -134,6 +134,7 @@ def rigid_body_fill(
                     foot_ankle_pt=ank_pt,
                     foot_toe_pt=toe_pt,
                     shin_axis_reference=shin_ref,
+                    segment_kind=kind,
                 )
                 max_res = 0.0 if np.isfinite(pred).all() else np.nan
             used = list(used)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Literal
 
 import numpy as np
 
@@ -13,11 +14,13 @@ from marker_label.synthesize_rhee_from_static import (
     shin_axis_ankle_toe_tibia,
 )
 
+from .reference import _global_to_local, _local_coords_from_three, _local_to_global
 from .segment_utils import unique_segment_markers
 
 _FOOT_MARKERS = frozenset(
     {"LANK", "LTOE", "LHEE", "RANK", "RTOE", "RHEE"}
 )
+TwoMarkerKind = Literal["foot", "body"]
 
 
 def _foot_tibia_for_marker(marker: str) -> str | None:
@@ -58,28 +61,36 @@ def _foot_ankle_toe_in_means(means: Mapping[str, np.ndarray]) -> tuple[str, str]
 
 def unpack_two_marker_pack(
     pack: tuple,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str, str]:
-    """``(offset, flip_ref, shin_ref?, origin, x)``; legacy 4-tuples omit shin_ref."""
-    if len(pack) == 4:
-        off, flip, o_m, x_m = pack
-        return (
-            np.asarray(off, dtype=np.float64),
-            np.asarray(flip, dtype=np.float64),
-            None,
-            str(o_m),
-            str(x_m),
-        )
-    off, flip, shin_ref, o_m, x_m = pack
-    shin = None
-    if shin_ref is not None:
-        shin = np.asarray(shin_ref, dtype=np.float64)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str, str, TwoMarkerKind]:
+    """``(offset, aux, shin_ref?, origin, x, kind?)``; legacy tuples default to foot."""
+    kind: TwoMarkerKind = "foot"
+    if len(pack) == 6:
+        off, aux, shin, o_m, x_m, kind_raw = pack
+        kind = "body" if str(kind_raw) == "body" else "foot"
+    elif len(pack) == 5:
+        off, aux, shin, o_m, x_m = pack
+    elif len(pack) == 4:
+        off, aux, o_m, x_m = pack
+        shin = None
+    else:
+        raise ValueError(f"Invalid two-marker pack length {len(pack)}")
+    shin_out = None
+    if shin is not None:
+        shin_out = np.asarray(shin, dtype=np.float64)
     return (
         np.asarray(off, dtype=np.float64),
-        np.asarray(flip, dtype=np.float64),
-        shin,
+        np.asarray(aux, dtype=np.float64),
+        shin_out,
         str(o_m),
         str(x_m),
+        kind,
     )
+
+
+def _uses_body_segment_basis(origin_marker: str, x_marker: str, target_marker: str) -> bool:
+    """Pelvis/thigh/knee chain markers use segment-local frames, not foot basis."""
+    tgt = str(target_marker).strip()
+    return tgt.endswith("THI") or tgt.endswith("KNE")
 
 
 def body_offset_from_static_means(
@@ -89,7 +100,16 @@ def body_offset_from_static_means(
     target_marker: str,
     lab_vertical: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """Return ``(offset in ankle-toe basis, flip_reference, shin_axis_ref)``."""
+    """Return ``(offset, aux, shin_axis_ref)`` for foot or body two-marker packs."""
+    if _uses_body_segment_basis(origin_marker, x_marker, target_marker):
+        o = np.asarray(means[origin_marker], dtype=np.float64)
+        x = np.asarray(means[x_marker], dtype=np.float64)
+        t = np.asarray(means[target_marker], dtype=np.float64)
+        origin, basis = _local_coords_from_three(o, x, t)
+        local = _global_to_local(t, origin, basis)
+        third_delta = t - x
+        return local, third_delta, None
+
     foot_ank_toe = _foot_ankle_toe_in_means(means)
     if foot_ank_toe is not None:
         ank_name, toe_name = foot_ank_toe
@@ -151,7 +171,16 @@ def predict_from_two_anchors(
     foot_ankle_pt: np.ndarray | None = None,
     foot_toe_pt: np.ndarray | None = None,
     shin_axis_reference: np.ndarray | None = None,
+    segment_kind: TwoMarkerKind = "foot",
 ) -> np.ndarray:
+    if segment_kind == "body":
+        third = np.asarray(x_pt, dtype=np.float64) + np.asarray(flip_reference, dtype=np.float64)
+        try:
+            origin, basis = _local_coords_from_three(origin_pt, x_pt, third)
+        except ValueError:
+            return np.full(3, np.nan)
+        return _local_to_global(offset, origin, basis)
+
     basis_o = (
         np.asarray(foot_ankle_pt, dtype=np.float64)
         if foot_ankle_pt is not None and np.isfinite(foot_ankle_pt).all()
@@ -231,10 +260,13 @@ def static_offsets_for_three_marker_segment(
             extra = _mean_finite_positions(static_points, label_to_idx, [tib])
             if extra:
                 means.update(extra)
-    out: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray | None, str, str]] = {}
+    out: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray | None, str, str, TwoMarkerKind]] = {}
     for tgt in names:
         others = [n for n in names if n != tgt]
         o_m, x_m = others[0], others[1]
-        off, flip, shin_ref = body_offset_from_static_means(means, o_m, x_m, tgt, lab_vertical)
-        out[tgt] = (off, flip, shin_ref, o_m, x_m)
+        off, aux, shin_ref = body_offset_from_static_means(means, o_m, x_m, tgt, lab_vertical)
+        kind: TwoMarkerKind = (
+            "body" if _uses_body_segment_basis(o_m, x_m, tgt) else "foot"
+        )
+        out[tgt] = (off, aux, shin_ref, o_m, x_m, kind)
     return out
