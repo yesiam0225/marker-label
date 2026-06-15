@@ -9,7 +9,13 @@ import numpy as np
 from marker_label.trial_trim import kabsch
 
 from .segment_utils import min_visible_others_for_segment, segment_uses_two_marker_rigid
-from .two_marker_static import pick_two_anchor_markers, predict_from_two_anchors, unpack_two_marker_pack, _foot_tibia_for_marker
+from .two_marker_static import (
+    _FOOT_MARKERS,
+    _foot_tibia_for_marker,
+    pick_two_anchor_markers,
+    predict_from_two_anchors,
+    unpack_two_marker_pack,
+)
 
 
 def _confidence_from_residual(max_res: float, cfg: Mapping) -> str:
@@ -235,6 +241,8 @@ def _foot_ankle_toe_pts(
     marker: str,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     m = str(marker).strip()
+    if m not in _FOOT_MARKERS:
+        return None, None
     if m.startswith("L"):
         ank_name, toe_name = "LANK", "LTOE"
     elif m.startswith("R"):

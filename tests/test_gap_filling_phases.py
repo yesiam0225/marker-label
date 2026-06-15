@@ -129,6 +129,41 @@ def test_shank_rtib_rigid_two_marker_uses_body_frame(tmp_path: Path) -> None:
     assert abs(float(row["RTIB_y"]) - 350.0) < 80.0
 
 
+def test_upper_arm_rupa_rigid_two_marker_uses_body_frame(tmp_path: Path) -> None:
+    static = tmp_path / "static.csv"
+    dynamic = tmp_path / "dyn.csv"
+    out = tmp_path / "out.csv"
+    static.write_text(
+        "frame,time,RSHO_x,RSHO_y,RSHO_z,RUPA_x,RUPA_y,RUPA_z,RELB_x,RELB_y,RELB_z\n"
+        "0,0,0,400,900,200,350,850,250,380,700\n"
+    )
+    rows = [
+        "frame,time,"
+        "RSHO_x,RSHO_y,RSHO_z,RUPA_x,RUPA_y,RUPA_z,RELB_x,RELB_y,RELB_z,"
+        "RANK_x,RANK_y,RANK_z,RTOE_x,RTOE_y,RTOE_z\n"
+    ]
+    rows.append(
+        "705,7.05,"
+        "-1466.4,475.2,1373.8,nan,nan,nan,-1430.5,516.0,1042.2,"
+        "-1489.8,310.3,53.7,-1642.5,337.7,25.4\n"
+    )
+    dynamic.write_text("".join(rows))
+    seg = {"R_UpperArm": ["RSHO", "RUPA", "RELB"]}
+    cfg = dict(DEFAULT_GAP_FILLING_CONFIG)
+    cfg["synthesize_missing_foot_heels"] = False
+    cfg["synthesize_missing_hand_markers"] = False
+    cfg["synthesize_hand_from_contralateral"] = False
+    gap_fill(str(dynamic), str(out), seg, static_csv_path=str(static), config=cfg)
+
+    import pandas as pd
+
+    df = pd.read_csv(out)
+    row = df.iloc[0]
+    assert row["RUPA_z"] > row["RELB_z"]
+    assert row["RUPA_z"] < row["RSHO_z"]
+    assert float(row["RUPA_z"]) > 800.0
+
+
 def test_gap_fill_with_static_csv(tmp_path: Path) -> None:
     static = tmp_path / "s.csv"
     dynamic = tmp_path / "d.csv"

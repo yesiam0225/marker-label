@@ -87,10 +87,20 @@ def unpack_two_marker_pack(
     )
 
 
+_BODY_SEGMENT_SUFFIXES = (
+    "THI",
+    "KNE",
+    "TIB",
+    "UPA",
+    "ELB",
+    "SHO",
+)
+
+
 def _uses_body_segment_basis(origin_marker: str, x_marker: str, target_marker: str) -> bool:
-    """Pelvis/thigh/knee/shank chain markers use segment-local frames, not foot basis."""
+    """Limb and upper-arm markers use segment-local frames; foot markers use foot basis."""
     tgt = str(target_marker).strip()
-    return tgt.endswith("THI") or tgt.endswith("KNE") or tgt.endswith("TIB")
+    return any(tgt.endswith(suffix) for suffix in _BODY_SEGMENT_SUFFIXES)
 
 
 def body_offset_from_static_means(
