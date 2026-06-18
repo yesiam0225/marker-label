@@ -7,7 +7,7 @@ Label marker sets in motion capture C3D files using subject-specific static tria
 - **Subject-specific**: Uses each subject's labeled static trial to build a body template.
 - **Obstacle markers**: Detected first. **Default:** `rod_pair` mode (median motion + rod geometry on simultaneous finite frames; min visibility **0.72**; motion cap **5.0** mm/frame unless disabled). Labels **OBSTACLE_L** / **OBSTACLE_R**. Use `--obstacle-mode legacy` for the older “two lowest mean-motion columns” rule.
 - **Body markers**: Template match at a middle high-quality frame, then propagate labels forward and backward.
-- **Gap filling**: Optional export of filled trajectories (linear/spline for short/medium gaps, propagation for long).
+- **Gap filling**: Static-aware fill on corrected labeled CSVs (spline/rigid phases, foot and hand synthesis). See [Gap filling](#gap-filling).
 - **Output**: Both original (NaNs preserved) and filled C3D and CSV (rows = frames, columns = frame, time, `{marker}_x`, `{marker}_y`, `{marker}_z`).
 
 ## Install
@@ -87,6 +87,70 @@ report = run_quality_report("out/trial_01_labeled.csv")
 # report["visibility"], report["velocity_jumps"], report["obstacle_std"], etc.
 ```
 
+### Gap filling
+
+Fill gaps in **already labeled, marker-corrected** flat CSVs (`*_corrected.csv`). This is separate from the main `marker-label` labeling pipeline (which can export filled C3D/CSV at label time with a simpler interpolator).
+
+**Single trial:**
+
+```bash
+marker-label-gap-fill "corrected/BBA09 Trial 10_corrected.csv" \
+  -o "corrected/added/extra/BBA09 Trial 10_filled.csv" \
+  --static-csv "data/BBA09/BBA09 Cal 01.c3d" \
+  --segments-preset full-body
+```
+
+**Batch** (manifest CSV with `csv_path`, `subject_id`, …; static paths from `--static-map` or auto-discovery):
+
+```bash
+marker-label-batch-gap-fill corrected/obs_trials_gap_filled.csv \
+  --output-dir corrected/gap_filled_full_body \
+  --static-map corrected/subject_static_map.csv \
+  --segments-preset full-body \
+  --skip-existing
+```
+
+Extra cohort example: input paths in `corrected/added/extra_obs_trials.csv` → outputs under `corrected/added/extra/*_filled.csv`.
+
+#### What the filler does
+
+Phases (see `src/marker_label/gap_filling/orchestrator.py`):
+
+1. Short gaps — spline / linear interpolation  
+2. **Two-marker rigid fill** — when two of three segment markers are visible (`two_marker_static.py`)  
+3. **Missing marker synthesis** — e.g. LHEE/RHEE from foot geometry; LWRB/LFIN from forearm frame or contralateral hand  
+4. Long gaps — rigid propagation from static reference where configured  
+
+Important frame rules (recent fixes):
+
+| Marker type | Two-marker basis |
+|-------------|------------------|
+| Foot (HEE, TOE, ANK, …) | Foot basis (ankle–toe, shin axis from static) |
+| Shank **TIB**, upper arm **UPA**, **ELB**, **SHO**, thigh **THI**, knee **KNE** | **Body segment** local frame (not foot basis) |
+
+Hand markers without trajectories may be synthesized from forearm markers (LFRM+LWRA) or mirrored from the contralateral side when static reference is unavailable.
+
+Common CLI flags: `--static-csv`, `--segments-preset {full-body,lower-body,legs-feet}`, `--no-two-marker-rigid`, `--enable-shoulder-from-thorax`, `--no-continuity-check`. Run `marker-label-gap-fill --help` for the full list.
+
+#### Outputs (per trial)
+
+For output path `…/Trial_filled.csv` the pipeline also writes:
+
+| File | Purpose |
+|------|---------|
+| `Trial_filled.csv` | Gap-filled trajectories (downstream input) |
+| `Trial_filled_fills.csv` | Per-frame fill log (method, source markers, confidence) |
+| `Trial_filled_quality.json` | Summary metrics, reverts, static path used |
+| `Trial_filled_summary.png` | QC plot |
+
+Inspect fills with `marker-label-view Trial_filled.csv` or read `_fills.csv` for a specific marker/frame.
+
+#### Re-run downstream after code changes
+
+Gap-fill **code changes do not update existing `*_filled.csv` files** until you re-run `marker-label-gap-fill` or `marker-label-batch-gap-fill`. After re-filling, re-run **gait-spatiotemporal** and **gait_analysis** / **gait-mos-kinematics** on the new CSVs so stride events, kinematics, MoS, and peaks reflect the fix.
+
+Tests: `pytest tests/test_gap_filling_phases.py -v`
+
 ### 3D QC viewer
 
 View labeled C3D or CSV in 3D with **body segments** (sticks between markers) and playback. Segments are defined in `marker_label.segments.SEGMENTS` (Vicon-style: head, thorax, pelvis, arms, legs). Requires `[qc]`: `pip install -e ".[qc]"`.
@@ -97,7 +161,7 @@ marker-label-view path/to/trial_01_labeled.c3d
 marker-label-view path/to/trial_01_labeled.csv
 ```
 
-Options: `--point-size` (default 12), `--speed` playback multiplier (default 1), `--background` (`white` or `black`), `--segment-color` (default `darkblue`), `--scale FACTOR` (e.g. 1000 if the file is in meters so markers display at mm scale).
+Options: `--point-size` (default 12), `--font-size` (default 21, marker label text), `--speed` playback multiplier (default 1), `--background` (`white` or `black`), `--segment-color` (default `darkblue`), `--scale FACTOR` (e.g. 1000 if the file is in meters so markers display at mm scale), `--y-clip-min` / `--y-clip-max` (hide markers outside a lab-Y band in mm, after `--scale`; defaults -1000 and 1200). Zoom in the window with **+** / **-** keys or the on-screen Zoom buttons. There is no CLI for window pixel size; resize the PyVista window manually.
 
 To add or change segments, edit `src/marker_label/segments.py`: each segment is an ordered list of marker names; consecutive pairs are drawn as lines (see docstring).
 
@@ -135,6 +199,18 @@ marker-label-analyze "path/to/BBpilot01 Cal 01.c3d" "path/to/BBpilot01 Trial 10.
 
 Options: `--sample N` (analyze every Nth frame; default 1), `--pelvis-frame` (build template in pelvis frame), `--static-unit {mm,m}`, `--dynamic-unit {mm,m}` (default mm; use m if file is in meters), `-o report.json` (write full result as JSON).
 
+### Export C3D to flat CSV (no labeling)
+
+Convert a raw or labeled `.c3d` to the same flat layout the pipeline uses (`frame`, `time`, `{marker}_x/y/z`). Marker names come from C3D point labels unless `--numeric-labels` is set.
+
+```bash
+PYTHONPATH=src python scripts/c3d_to_csv_column_indices.py \
+  "data/BBA01/BBA01 Trial 05.c3d" \
+  -o "data/BBA01/BBA01 Trial 05.csv"
+```
+
+Options: `-o` output path (default: input with `.csv`), `--scale 1000` (m → mm), `--numeric-labels` (force index-only column names), `--zero-based` (numeric fallback names 0, 1, …). The script prints a 0-based C3D index → label map to stderr.
+
 ## Pipeline summary
 
 1. Load static (labeled) and dynamic (unlabeled) C3D.
@@ -153,14 +229,102 @@ For a detailed explanation of the logic and what to check when labeling fails, s
 
 Vicon full-body pelvis markers: LASI, RASI, LPSI, RPSI (and SACR if present). Used when building template in pelvis frame; currently template matching defaults to lab frame.
 
-## Related projects
+## Downstream gait analysis
 
-Labeled CSV output (`frame`, `{marker}_x/y/z`) is the input contract for downstream gait analysis:
+Labeled or gap-filled marker CSVs (`frame`, `{marker}_x/y/z`, mm, 100 Hz) feed external spatiotemporal detection, then in-repo or sibling kinematics/MoS batch jobs. Frame indices in `per_stride_data.csv` are **0-based row indices** into the trial CSV passed on the command line.
+
+### Related repositories
 
 | Repository | Role |
 |------------|------|
-| [gait-spatiotemporal](https://github.com/gait-spatiotemporal/gait-spatiotemporal) | Rule-based IC/TO detection and spatiotemporal parameters |
+| [gait-spatiotemporal](https://github.com/gait-spatiotemporal/gait-spatiotemporal) | IC/TO detection, strides, `per_stride_data.csv`, `per_step_data.csv` |
+| [gait-mos-kinematics](https://github.com/gait-mos-kinematics/gait-mos-kinematics) | Kinematics ensemble + **joint peak CSVs** (`batch-kinematics-peaks`, `batch-kinematics-ensemble` with spike filtering) |
 | [gait-events-vlm](https://github.com/gait-events-vlm/gait-events-vlm) | VLM-based IC/TO from foot Z plots (experimental / QC) |
+
+In-repo **`gait_analysis/`** runs kinematics ensemble and MoS (discrete + time-series + QC plots). See [gait_analysis/README.md](gait_analysis/README.md). It does **not** export peak CSVs; use **gait-mos-kinematics** for `kinematics_all_strides.csv` and `peaks_per_stride.csv`.
+
+### Batch workflow (full cohort)
+
+Typical order:
+
+1. **Marker CSVs** — `corrected/` or `corrected/gap_filled_full_body/` (paths in obs manifest).
+2. **Spatiotemporal** — `spatiotemporal-gait --trial-manifest … --output-dir gait_spatiotemporal_out/`
+3. **Kinematics + MoS** — `gait_analysis/run_all.py` with matching `--obs-csv`, `--ps-csv`, `--trial-dir`
+4. **Peaks (optional)** — `batch-kinematics-peaks` and `batch-kinematics-ensemble` from gait-mos-kinematics
+
+Example (main gap-filled cohort):
+
+```bash
+# 1. Spatiotemporal (sibling repo; install with pip install -e .)
+spatiotemporal-gait \
+  --trial-manifest corrected/obs_trials_gap_filled.csv \
+  --output-dir gait_spatiotemporal_out \
+  --subject-id PLACEHOLDER --group adult --board RB --time pre
+
+# 2. Kinematics + MoS (from repo root)
+python gait_analysis/run_all.py \
+  --obs-csv corrected/obs_trials_gap_filled.csv \
+  --ps-csv gait_spatiotemporal_out/per_stride_data.csv \
+  --trial-dir corrected/gap_filled_full_body
+```
+
+Default MoS/kinematics output: `gait_analysis/output/` (or set `GAIT_OUTPUT_DIR`). A full-cohort run with explicit paths is often written under `output/gait_mos_kinematics/`.
+
+### Batch workflow (extra cohort)
+
+Additional gap-filled trials live under `corrected/added/extra/` with manifest `corrected/added/extra_obs_trials.csv` (columns: `csv_path`, `subject_id`, `trial`, `board`, `time`, `group`, `leg_length_mm`, `height_mm`).
+
+```bash
+# 1. Spatiotemporal
+spatiotemporal-gait \
+  --trial-manifest corrected/added/extra_obs_trials.csv \
+  --output-dir gait_spatiotemporal_out/extra \
+  --subject-id PLACEHOLDER --group adult --board RB --time pre
+
+# 2. Kinematics + MoS (custom output dir via per-script --output-dir)
+cd gait_analysis/src
+python batch_kinematics_ensemble.py \
+  --obs-csv ../../corrected/added/extra_obs_trials.csv \
+  --ps-csv ../../gait_spatiotemporal_out/extra/per_stride_data.csv \
+  --trial-dir ../.. \
+  --output-dir ../../output/gait_mos_kinematics_extra/ensemble_curves
+# … batch_mos.py, batch_mos_timeseries.py, visualize_mos.py with the same obs/ps/trial-dir
+
+# 3. Joint peaks (gait-mos-kinematics sibling repo)
+batch-kinematics-peaks \
+  --obs-csv corrected/added/extra_obs_trials.csv \
+  --ps-csv gait_spatiotemporal_out/extra/per_stride_data.csv \
+  --trial-dir . \
+  --output-dir output/gait_mos_kinematics_extra/peaks/
+
+batch-kinematics-ensemble \
+  --obs-csv corrected/added/extra_obs_trials.csv \
+  --ps-csv gait_spatiotemporal_out/extra/per_stride_data.csv \
+  --trial-dir . \
+  --output-dir output/gait_mos_kinematics_extra/ensemble_curves
+# also writes peaks/peaks_per_stride.csv alongside ensemble_curves/
+```
+
+### Output layout (reference)
+
+| Stage | Typical path | Key files |
+|-------|----------------|-----------|
+| Spatiotemporal (main) | `gait_spatiotemporal_out/` | `per_stride_data.csv`, `per_step_data.csv` |
+| Spatiotemporal (extra) | `gait_spatiotemporal_out/extra/` | same names |
+| Kinematics + MoS (main) | `output/gait_mos_kinematics/` | `ensemble_curves/`, `mos/`, `mos_timeseries/`, `mos_plots/`, `peaks/` |
+| Kinematics + MoS (extra) | `output/gait_mos_kinematics_extra/` | same layout + `event_plots/` for IC/TO QC |
+| Peaks (gait-mos-kinematics) | `…/peaks/` | `kinematics_all_strides.csv`, `peaks_per_stride.csv`, `peaks_subject_condition.csv` |
+
+### Step parameters and phases
+
+- **`per_step_data.csv`**: one row per IC; `step_length_mm` / `step_width_mm` are stored on the **landing IC** and require a previous opposite-foot IC (first IC in a trial is NaN).
+- **Stride phase** (`approach`, `crossing_lead`, `crossing_trail`, `recovery`) is assigned per **same-foot stride**, not per contralateral HS→HS step. Step-level phase labels for analysis may need a separate export (see gait-spatiotemporal / future `step_phase` work).
+- **MoS clearance** (`ap_clearance`, `ml_clearance`) = `step_length_mm − mos_ap_HS` (Beerse et al.); NaN when `step_length_mm` is NaN.
+
+### QC scripts
+
+- IC/TO on foot-Z traces: `scripts/plot_spatiotemporal_events_batch.py` (uses gait-spatiotemporal + gait-events-vlm).
+- Extra cohort example plots: `output/gait_mos_kinematics_extra/event_plots/`.
 
 ## License
 
