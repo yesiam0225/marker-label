@@ -237,9 +237,8 @@ Labeled or gap-filled marker CSVs (`frame`, `{marker}_x/y/z`, mm, 100 Hz) feed e
 
 | Repository | Role |
 |------------|------|
-| [gait-spatiotemporal](https://github.com/gait-spatiotemporal/gait-spatiotemporal) | IC/TO detection, strides, `per_stride_data.csv`, `per_step_data.csv` |
-| [gait-mos-kinematics](https://github.com/gait-mos-kinematics/gait-mos-kinematics) | Kinematics ensemble + **joint peak CSVs** (`batch-kinematics-peaks`, `batch-kinematics-ensemble` with spike filtering) |
-| [gait-events-vlm](https://github.com/gait-events-vlm/gait-events-vlm) | VLM-based IC/TO from foot Z plots (experimental / QC) |
+| [gait-spatiotemporal](https://github.com/yesiam0225/gait-spatiotemporal) | IC/TO detection, strides, `per_stride_data.csv`, `per_step_data.csv` |
+| [gait-mos-kinematics](https://github.com/yesiam0225/gait-mos-kinematics) | Kinematics ensemble + **joint peak CSVs** (`batch-kinematics-peaks`, `batch-kinematics-ensemble` with spike filtering) |
 
 Each sibling repo README documents its stage of this pipeline (CLI, inputs/outputs, and cross-links back here).
 
@@ -325,7 +324,7 @@ batch-kinematics-ensemble \
 
 ### QC scripts
 
-- IC/TO on foot-Z traces: `scripts/plot_spatiotemporal_events_batch.py` (uses gait-spatiotemporal + gait-events-vlm).
+- IC/TO on foot-Z traces: `scripts/plot_spatiotemporal_events_batch.py` (uses gait-spatiotemporal event detection).
 - Extra cohort example plots: `output/gait_mos_kinematics_extra/event_plots/<subject>_<board>_<time>/`.
 
 ## License

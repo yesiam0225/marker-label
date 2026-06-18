@@ -135,4 +135,4 @@ python batch_kinematics_ensemble.py \
   --output-dir ../../output/gait_mos_kinematics_extra/ensemble_curves
 ```
 
-Repeat for `batch_mos.py`, `batch_mos_timeseries.py`, and `visualize_mos.py` with the same `--obs-csv`, `--ps-csv`, `--trial-dir` and output under `output/gait_mos_kinematics_extra/`. Joint peak CSVs require the sibling [gait-mos-kinematics](https://github.com/gait-mos-kinematics/gait-mos-kinematics) package (`batch-kinematics-peaks`). See the root [README.md](../README.md#downstream-gait-analysis).
+Repeat for `batch_mos.py`, `batch_mos_timeseries.py`, and `visualize_mos.py` with the same `--obs-csv`, `--ps-csv`, `--trial-dir` and output under `output/gait_mos_kinematics_extra/`. Joint peak CSVs require the sibling [gait-mos-kinematics](https://github.com/yesiam0225/gait-mos-kinematics) package (`batch-kinematics-peaks`). See the root [README.md](../README.md#downstream-gait-analysis).
