@@ -8,8 +8,8 @@ propagation). Does not correct wrong label-to-column assignment.
 
 Example:
   PYTHONPATH=src python scripts/correct_pelvis_to_static_geometry.py \\
-    "data/BBA02 Trial 26.c3d" "data/BBA02 Trial 82_bf216_labeled.csv" \\
-    -o "data/BBA02 Trial 82_bf216_labeled_pelvisfix.csv" --rmse-threshold 15
+    "data/SUBJ02 Trial 26.c3d" "data/SUBJ02 Trial 82_bf216_labeled.csv" \\
+    -o "data/SUBJ02 Trial 82_bf216_labeled_pelvisfix.csv" --rmse-threshold 15
 """
 
 from __future__ import annotations

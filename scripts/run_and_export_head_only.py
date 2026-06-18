@@ -7,7 +7,7 @@ Usage:
   python scripts/run_and_export_head_only.py <static.c3d> <dynamic.c3d> -o <out_prefix>
 
 Example:
-  python scripts/run_and_export_head_only.py "data/BBA01 Cal 01.c3d" "data/BBA01 Trial 05.c3d" -o out/BBA01_trial05_head_only
+  python scripts/run_and_export_head_only.py "data/SUBJ01 Cal 01.c3d" "data/SUBJ01 Trial 05.c3d" -o out/SUBJ01_trial05_head_only
 
 Uses check_screened_count=False so it runs even when dynamic has other than 41 channels.
 Writes <out_prefix>_head_only.csv (and prints a short summary).
@@ -31,7 +31,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Run pipeline and export only head markers (LFHD, RFHD, LBHD, RBHD).")
     ap.add_argument("static", help="Path to labeled static C3D")
     ap.add_argument("dynamic", help="Path to unlabeled dynamic C3D")
-    ap.add_argument("-o", "--output", required=True, help="Output path prefix (e.g. out/BBA01_trial05_head_only)")
+    ap.add_argument("-o", "--output", required=True, help="Output path prefix (e.g. out/SUBJ01_trial05_head_only)")
     ap.add_argument("--static-facing", choices=("x", "-x", "y", "-y"), default=None)
     ap.add_argument("--dynamic-facing", choices=("x", "-x", "y", "-y"), default=None)
     ap.add_argument("--no-filled", action="store_true", help="Do not export filled full output")

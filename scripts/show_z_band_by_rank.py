@@ -5,7 +5,7 @@ fall in each band when bands are assigned by Z rank (highest Z → band 11, etc.
 
 Usage:
   python scripts/show_z_band_by_rank.py [dynamic.c3d]
-  (Optional) With one argument, use that dynamic C3D; else data/BBA01 Trial 05.c3d
+  (Optional) With one argument, use that dynamic C3D; else data/SUBJ01 Trial 05.c3d
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from marker_label.constants import Z_BAND_LABEL_TO_BAND
 
 def main() -> None:
     base = Path(__file__).resolve().parents[1]
-    dynamic_path = base / "data" / "BBA01 Trial 05.c3d"
+    dynamic_path = base / "data" / "SUBJ01 Trial 05.c3d"
     if len(sys.argv) >= 2:
         dynamic_path = Path(sys.argv[1])
     if not dynamic_path.exists():
@@ -86,7 +86,7 @@ def main() -> None:
     point_bands = _point_band_indices_by_z_rank(pts_f, band_sizes=band_sizes, n_bands=N_Z_BANDS)
 
     # Build template and get assignments so we can show label per point
-    static_path = base / "data" / "BBA01 Cal 01.c3d"
+    static_path = base / "data" / "SUBJ01 Cal 01.c3d"
     if static_path.exists():
         static = load_c3d(str(static_path))
         labels_s = static["labels"]

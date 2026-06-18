@@ -6,8 +6,8 @@ This document describes how to use **manually labeled** static and dynamic trial
 
 ## Overview
 
-1. **Reference subject** (e.g. BBpilot01): You have both static and dynamic **manually labeled** with the same marker names.
-2. **Target subject** (e.g. BBA01): You have a **labeled static** trial and an **unlabeled dynamic** trial that you want to label.
+1. **Reference subject** (e.g. REF01): You have both static and dynamic **manually labeled** with the same marker names.
+2. **Target subject** (e.g. SUBJ01): You have a **labeled static** trial and an **unlabeled dynamic** trial that you want to label.
 
 The idea: learn the static–dynamic relationship from the reference, then use that knowledge to improve the pipeline when labeling the target subject.
 
@@ -18,7 +18,7 @@ The idea: learn the static–dynamic relationship from the reference, then use t
 Use `marker-label-analyze` on the reference subject’s manually labeled static and dynamic C3D files:
 
 ```bash
-marker-label-analyze "path/to/BBpilot01 Cal 01.c3d" "path/to/BBpilot01 Trial 10.c3d" -o reference_report.json
+marker-label-analyze "path/to/REF01 Cal 01.c3d" "path/to/REF01 Trial 10.c3d" -o reference_report.json
 ```
 
 This produces:
@@ -49,7 +49,7 @@ The pipeline picks a “best frame” in the **middle** of the trial (default 20
 Example:
 
 ```bash
-marker-label "path/to/BBA01 Cal 01.c3d" "path/to/BBA01 Trial 05.c3d" -o out/BBA01_trial05 \
+marker-label "path/to/SUBJ01 Cal 01.c3d" "path/to/SUBJ01 Trial 05.c3d" -o out/SUBJ01_trial05 \
   --static-facing y --dynamic-facing x \
   --reference-report reference_report.json
 ```

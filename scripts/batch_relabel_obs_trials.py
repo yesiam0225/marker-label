@@ -123,7 +123,7 @@ def main() -> None:
         action="append",
         default=[],
         metavar="ID",
-        help="Process only this subject (repeatable, e.g. --subject BBA01)",
+        help="Process only this subject (repeatable, e.g. --subject SUBJ01)",
     )
     parser.add_argument(
         "--in-place",

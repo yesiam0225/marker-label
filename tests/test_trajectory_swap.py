@@ -294,9 +294,9 @@ def test_velocity_interval_minimum_displacement() -> None:
 
 # --- Real-data integration (conditional) ---
 
-TRIAL_21_DIR = Path("data/BBC01")
-TRIAL_21_TRIMMED = TRIAL_21_DIR / "BBC01 Trial 21_labeled_trimmed.csv"
-TRIAL_21_ORIGINAL = TRIAL_21_DIR / "BBC01 Trial 21_labeled.csv"
+TRIAL_21_DIR = Path("data/SUBJ03")
+TRIAL_21_TRIMMED = TRIAL_21_DIR / "SUBJ03 Trial 21_labeled_trimmed.csv"
+TRIAL_21_ORIGINAL = TRIAL_21_DIR / "SUBJ03 Trial 21_labeled.csv"
 trial_21_available = TRIAL_21_TRIMMED.is_file() and TRIAL_21_ORIGINAL.is_file()
 
 

@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> None:
 Examples:
   marker-label-batch-synthesize-fin "corrected/obs trials.csv" \\
     --static-map corrected/subject_static_map.csv \\
-    --subject BBC13 --side right --only-if-fin-missing --backup
+    --subject SUBJ01 --side right --only-if-fin-missing --backup
 """,
     )
     parser.add_argument("manifest", nargs="?", default="corrected/obs trials.csv")

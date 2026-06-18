@@ -89,7 +89,7 @@ def main() -> None:
     )
     ap.add_argument("static", help="Path to labeled static C3D")
     ap.add_argument("dynamic", help="Path to unlabeled dynamic C3D")
-    ap.add_argument("-o", "--output", required=True, help="Output path prefix (e.g. out/BBA01_trial05)")
+    ap.add_argument("-o", "--output", required=True, help="Output path prefix (e.g. out/SUBJ01_trial05)")
     ap.add_argument("--static-facing", choices=("x", "-x", "y", "-y"), default=None)
     ap.add_argument("--dynamic-facing", choices=("x", "-x", "y", "-y"), default=None)
     ap.add_argument("--no-viewer", action="store_true", help="Do not open the viewer after export")

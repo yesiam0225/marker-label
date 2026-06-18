@@ -64,7 +64,7 @@ def resolve_input_path(path: str | Path) -> Path:
     Resolve a viewer input path.
 
     Tries the path as given, then cwd-relative, then relative to the repo root
-    found by walking up from cwd or the installed package (so ``data/BBC03/...``
+    found by walking up from cwd or the installed package (so ``data/SUBJ01/...``
     works from any working directory).
     """
     p = Path(path).expanduser()

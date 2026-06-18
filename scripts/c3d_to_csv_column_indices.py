@@ -11,7 +11,7 @@ Column headers are ``{name}_x``, ``{name}_y``, ``{name}_z``.
 Prints 0-based index -> label used in CSV to stderr for cross-check.
 
 Usage (from repo root):
-  PYTHONPATH=src python scripts/c3d_to_csv_column_indices.py data/BBC10\\ Trial\\ 06.c3d -o out/trial06.csv
+  PYTHONPATH=src python scripts/c3d_to_csv_column_indices.py data/SUBJ03\\ Trial\\ 06.c3d -o out/trial06.csv
 """
 
 from __future__ import annotations

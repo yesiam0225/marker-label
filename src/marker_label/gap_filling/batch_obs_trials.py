@@ -35,7 +35,7 @@ def load_static_map(path: Path) -> dict[str, Path]:
 
 
 def gap_filled_output_path(input_csv: Path, output_dir: Path) -> Path:
-    """``BBA01 Trial 05_corrected.csv`` -> ``{output_dir}/BBA01 Trial 05_corrected_gap_filled.csv``."""
+    """``SUBJ01 Trial 05_corrected.csv`` -> ``{output_dir}/SUBJ01 Trial 05_corrected_gap_filled.csv``."""
     return output_dir / f"{input_csv.stem}_gap_filled.csv"
 
 

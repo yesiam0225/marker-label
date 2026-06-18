@@ -15,7 +15,7 @@ from marker_label.constants import N_Z_BANDS, WHOLE_BODY_39
 
 
 def main() -> None:
-    static_path = Path(__file__).resolve().parents[1] / "data" / "BBA01 Cal 01.c3d"
+    static_path = Path(__file__).resolve().parents[1] / "data" / "SUBJ01 Cal 01.c3d"
     if not static_path.exists():
         print(f"Static file not found: {static_path}")
         sys.exit(1)

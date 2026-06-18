@@ -297,7 +297,7 @@ def test_gap_fill_synthesizes_lwrb_from_contralateral_hand(tmp_path: Path) -> No
 
 
 def test_contralateral_lwrb_posterior_with_pelvis_ap(tmp_path: Path) -> None:
-    """Regression: sagittal lock must not flip a correct z-mirrored WRB (BBA09-like)."""
+    """Regression: sagittal lock must not flip a correct z-mirrored WRB (SUBJ01-like)."""
     dynamic = tmp_path / "dyn.csv"
     out = tmp_path / "out.csv"
     rows = [
@@ -491,7 +491,7 @@ def test_contralateral_lwrb_preserves_static_wra_wrb_distance(tmp_path: Path) ->
 
 
 def test_contralateral_static_mirror_lwrb_posterior_ap(tmp_path: Path) -> None:
-    """Mirrored static R WRB stays posterior to LWRA (pelvis A/P), BBA09-like."""
+    """Mirrored static R WRB stays posterior to LWRA (pelvis A/P), SUBJ01-like."""
     static = tmp_path / "static.csv"
     dynamic = tmp_path / "dyn.csv"
     out = tmp_path / "out.csv"

@@ -20,7 +20,7 @@ from marker_label.trial_trim import parse_labeled_csv
 
 
 def test_forearm_local_roundtrip_static():
-    static = Path("data/BBC13/BBC13 Cal 01.c3d")
+    static = Path("data/SUBJ02/SUBJ02 Cal 01.c3d")
     if not static.is_file():
         return
     pts, idx = load_static_for_hand(static, ("R",))
@@ -33,9 +33,9 @@ def test_forearm_local_roundtrip_static():
 
 
 def test_insert_rfin_column_bbc13_t38_forearm():
-    inp = Path("corrected/BBC13 Trial 38_corrected.csv")
+    inp = Path("corrected/SUBJ02 Trial 38_corrected.csv")
     if not inp.is_file():
-        inp = Path("data/BBC13/BBC13 Trial 38_corrected.csv")
+        inp = Path("data/SUBJ02/SUBJ02 Trial 38_corrected.csv")
     bak = inp.with_suffix(inp.suffix + ".pre_fin.bak")
     if bak.is_file():
         inp = bak
@@ -44,7 +44,7 @@ def test_insert_rfin_column_bbc13_t38_forearm():
     stems, _ = parse_labeled_csv(inp)
     out = Path(tempfile.gettempdir()) / "test_bbc13_t38_forearm_rfin.csv"
     info = synthesize_fin_csv(
-        "data/BBC13/BBC13 Cal 01.c3d",
+        "data/SUBJ02/SUBJ02 Cal 01.c3d",
         inp,
         out,
         sides=("R",),
@@ -59,12 +59,12 @@ def test_insert_rfin_column_bbc13_t38_forearm():
 
 
 def test_compare_methods_bbc13_t38():
-    inp = Path("corrected/BBC13 Trial 38_corrected.csv")
+    inp = Path("corrected/SUBJ02 Trial 38_corrected.csv")
     if not inp.is_file():
         return
     bak = inp.with_suffix(inp.suffix + ".pre_fin.bak")
     src = bak if bak.is_file() else inp
-    rep = compare_fin_methods_on_trial("data/BBC13/BBC13 Cal 01.c3d", src, side="R")
+    rep = compare_fin_methods_on_trial("data/SUBJ02/SUBJ02 Cal 01.c3d", src, side="R")
     assert "wrist" in rep["methods"] and "forearm" in rep["methods"]
     # Forearm method should track static WRA angle more closely on average
     w = rep["methods"]["wrist"]["angle_WRA_minus_static_mean"]

@@ -1,6 +1,6 @@
 # Gait analysis pipeline
 
-Obstacle-crossing gait kinematics and margin-of-stability (MoS) analysis for the BBA study (adult/child × RB/WB × pre/post).
+Obstacle-crossing gait kinematics and margin-of-stability (MoS) analysis (adult/child × RB/WB × pre/post).
 
 ## Layout
 
@@ -9,12 +9,12 @@ gait_analysis/
   src/                    # Python modules and CLIs
   data/                   # obs_trials.csv, per_stride_data.csv (symlinks to repo data)
   output/                 # Generated CSVs and plots (gitignored)
-  tests/test_smoke.py     # Single-trial smoke test (BBA01 T5)
+  tests/test_smoke.py     # Single-trial smoke test (SUBJ01 T5)
   run_all.py              # Run all four pipelines in sequence
   requirements.txt
 ```
 
-Trial marker CSVs live in the parent repo at `corrected/` (paths in `obs_trials.csv` use `corrected/BBA01 Trial 05_corrected.csv`).
+Trial marker CSVs live in the parent repo at `corrected/` (paths in `obs_trials.csv` use `corrected/SUBJ01 Trial 05_corrected.csv`).
 
 ## Setup
 
@@ -56,34 +56,35 @@ Single pipeline (defaults use `./data/` and `./output/`):
 
 ```bash
 cd src
-python batch_kinematics_ensemble.py --filter-trials BBA01:5
-python batch_mos.py --filter-trials BBA01:5
-python batch_mos_timeseries.py --filter-trials BBA01:5
-python visualize_mos.py --filter-trials BBA01:5
+python batch_kinematics_ensemble.py --filter-trials SUBJ01:5
+python batch_mos.py --filter-trials SUBJ01:5
+python batch_mos_timeseries.py --filter-trials SUBJ01:5
+python visualize_mos.py --filter-trials SUBJ01:5
 ```
 
 All four pipelines:
 
 ```bash
-python run_all.py --filter-trials BBA01:5
+python run_all.py --filter-trials SUBJ01:5
 ```
 
-Full dataset (exclude unreliable BBA02 T57 if needed):
+Full dataset (exclude known-bad trials with `--filter-trials` if needed):
 
 ```bash
 python run_all.py --filter-trials "$(python -c "
 import pandas as pd
 obs = pd.read_csv('data/obs_trials.csv')
+exclude = {('SUBJ02', 57)}  # example: skip unreliable gap fill
 pairs = [f\"{r.subject_id}:{r.trial}\" for _, r in obs.iterrows()
-         if not (r.subject_id=='BBA02' and r.trial==57)]
+         if (r.subject_id, int(r.trial)) not in exclude]
 print(','.join(pairs))
 ")"
 ```
 
-Or process everything and drop BBA02:57 manually:
+Or process everything and inspect logs for per-trial failures:
 
 ```bash
-python run_all.py   # all trials; inspect logs for BBA02 T57 errors
+python run_all.py
 ```
 
 ## Outputs
@@ -111,15 +112,15 @@ cd gait_analysis
 pytest tests/test_smoke.py -v
 ```
 
-## Verification (BBA01 T5, T23, T33, T48)
+## Verification (example trials)
 
 ```bash
-cd gait_analysis && python run_all.py --filter-trials BBA01:5,BBA01:23,BBA01:33,BBA01:48 && echo "SUCCESS"
+cd gait_analysis && python run_all.py --filter-trials SUBJ01:5,SUBJ01:23,SUBJ01:33,SUBJ01:48 && echo "SUCCESS"
 ```
 
-## Known data issue
+## Known data issues
 
-**BBA02 Trial 57** has unreliable external gap fill. Exclude with `--filter-trials` when running batch jobs.
+Some trials may have unreliable gap fill or marker quality. Exclude them with `--filter-trials SUBJ:NN` when running batch jobs.
 
 ## Extra cohort (added trials)
 

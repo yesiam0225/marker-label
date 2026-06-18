@@ -14,7 +14,7 @@ from marker_label.body_labeling import compute_walking_direction_x, get_lr_ap_ax
 
 
 def main() -> None:
-    path = sys.argv[1] if len(sys.argv) > 1 else "data/BBA01 Trial 05.c3d"
+    path = sys.argv[1] if len(sys.argv) > 1 else "data/SUBJ01 Trial 05.c3d"
     points = load_c3d(path)["points"]  # (n_frames, n_pts, 3)
 
     wdx = compute_walking_direction_x(points)

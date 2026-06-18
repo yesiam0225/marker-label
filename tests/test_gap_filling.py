@@ -244,10 +244,10 @@ def test_continuity_revert_clears_fill() -> None:
 
 @pytest.mark.integration
 def test_trial_21_gap_fill_quality() -> None:
-    inp = ROOT / "data/BBC01/BBC01 Trial 21_corrected.csv"
+    inp = ROOT / "data/SUBJ03/SUBJ03 Trial 21_corrected.csv"
     if not inp.is_file():
         pytest.skip("Trial 21 corrected CSV not in repo")
-    out = ROOT / "data/BBC01/_pytest_trial21_filled.csv"
+    out = ROOT / "data/SUBJ03/_pytest_trial21_filled.csv"
     _, meta = parse_labeled_csv(inp)
     n_frames = int(meta["n_frames"])
     seg = segment_markers_dict_for_trim_preset("full-body")
@@ -271,10 +271,10 @@ def test_trial_21_gap_fill_quality() -> None:
 
 @pytest.mark.integration
 def test_cli_creates_outputs() -> None:
-    inp = ROOT / "data/BBC01/BBC01 Trial 21_corrected.csv"
+    inp = ROOT / "data/SUBJ03/SUBJ03 Trial 21_corrected.csv"
     if not inp.is_file():
         pytest.skip("Trial 21 corrected CSV not in repo")
-    out = ROOT / "data/BBC01/_pytest_cli_filled.csv"
+    out = ROOT / "data/SUBJ03/_pytest_cli_filled.csv"
     cmd = [
         sys.executable,
         "-m",

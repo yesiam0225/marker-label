@@ -27,7 +27,7 @@ def main() -> None:
         if i + 1 < len(sys.argv):
             save_path = sys.argv[i + 1]
 
-    path = args[0] if args else "data/BBA01 Cal 01.c3d"
+    path = args[0] if args else "data/SUBJ01 Cal 01.c3d"
     data = load_c3d(path)
     points_s = data["points"]
     labels_s = data["labels"]

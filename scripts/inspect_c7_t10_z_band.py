@@ -10,7 +10,7 @@ may be labeled as RUPA/LUPA or something else).
 Usage:
   python scripts/inspect_c7_t10_z_band.py [static.c3d] [dynamic.c3d]
 
-Defaults: data/BBA01 Cal 01.c3d, data/BBA01 Trial 05.c3d
+Defaults: data/SUBJ01 Cal 01.c3d, data/SUBJ01 Trial 05.c3d
 Options: use same pipeline flags as marker-label (match-head-first, z-band-by-gap, whole-body-39).
 """
 
@@ -40,8 +40,8 @@ TRUNK_THORAX = frozenset({"C7", "T10", "STRN", "CLAV", "RBAK"})
 
 def main() -> None:
     base = Path(__file__).resolve().parents[1]
-    static_path = base / "data" / "BBA01 Cal 01.c3d"
-    dynamic_path = base / "data" / "BBA01 Trial 05.c3d"
+    static_path = base / "data" / "SUBJ01 Cal 01.c3d"
+    dynamic_path = base / "data" / "SUBJ01 Trial 05.c3d"
     if len(sys.argv) >= 3:
         static_path = Path(sys.argv[1])
         dynamic_path = Path(sys.argv[2])

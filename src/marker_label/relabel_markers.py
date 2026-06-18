@@ -393,7 +393,7 @@ def pass_dir(s, donor_X, donors, N, order, inlier_tol, dtol):
     return result
 
 def subject_id_from_csv_path(csv_path: str | Path) -> str | None:
-    """Extract subject id (e.g. BBC01) from ``BBC01 Trial 55_trimmed.csv``."""
+    """Extract subject id (e.g. SUBJ01) from ``SUBJ01 Trial 55_trimmed.csv``."""
     m = re.match(r"^([A-Z]+\d+)", Path(csv_path).name)
     return m.group(1) if m else None
 

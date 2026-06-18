@@ -12,7 +12,7 @@ When marker labeling is **completely off** (almost all body markers wrong, not j
 
 **Fix:** Use `--static-unit m` and/or `--dynamic-unit m` when the corresponding file is in meters. The pipeline then scales to mm internally so static and dynamic match.
 
-**In your setup:** Only the **manually labeled dynamic** trials (e.g. reference: BBpilot01 Trial 10) are in meters. For **marker-label** on BBA01, both BBA01 Cal 01 (static) and BBA01 Trial 05 (dynamic) are in mm, so no `--static-unit` or `--dynamic-unit` is needed. Use `--dynamic-unit m` only when running **marker-label-analyze** on a reference pair whose dynamic file is in m.
+**In your setup:** Only the **manually labeled dynamic** trials (e.g. reference: REF01 Trial 10) are in meters. For **marker-label** on SUBJ01, both SUBJ01 Cal 01 (static) and SUBJ01 Trial 05 (dynamic) are in mm, so no `--static-unit` or `--dynamic-unit` is needed. Use `--dynamic-unit m` only when running **marker-label-analyze** on a reference pair whose dynamic file is in m.
 
 ---
 

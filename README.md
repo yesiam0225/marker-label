@@ -23,8 +23,8 @@ Dependencies: `c3d`, `numpy`, `scipy`. For the 3D QC viewer: `pip install -e ".[
 ### CLI
 
 ```bash
-# Example: label BBA01 using its static (BBA01 Cal 01.c3d) and unlabeled dynamic (BBA01 Trial 05.c3d)
-marker-label "path/to/BBA01 Cal 01.c3d" "path/to/BBA01 Trial 05.c3d" -o out/BBA01_trial05
+# Example: label SUBJ01 using its static (SUBJ01 Cal 01.c3d) and unlabeled dynamic (SUBJ01 Trial 05.c3d)
+marker-label "path/to/SUBJ01 Cal 01.c3d" "path/to/SUBJ01 Trial 05.c3d" -o out/SUBJ01_trial05
 ```
 
 Options:
@@ -94,9 +94,9 @@ Fill gaps in **already labeled, marker-corrected** flat CSVs (`*_corrected.csv`)
 **Single trial:**
 
 ```bash
-marker-label-gap-fill "corrected/BBA09 Trial 10_corrected.csv" \
-  -o "corrected/added/extra/BBA09 Trial 10_filled.csv" \
-  --static-csv "data/BBA09/BBA09 Cal 01.c3d" \
+marker-label-gap-fill "corrected/SUBJ01 Trial 10_corrected.csv" \
+  -o "corrected/added/extra/SUBJ01 Trial 10_filled.csv" \
+  --static-csv "data/SUBJ01/SUBJ01 Cal 01.c3d" \
   --segments-preset full-body
 ```
 
@@ -189,12 +189,12 @@ Options: `--frame N`, `--point-size`, `--background`, `--static-facing`, `--dyna
 
 Analyze a **manually labeled** static + dynamic pair from a reference subject to see how the static template relates to each dynamic frame (per-frame rigid transform, RMS, and which frame is “closest” to the template). Useful to tune pipeline behavior or inspect typical rotation/translation.
 
-**Input files:** You must provide the **paths** to two C3D files from one **reference subject**, both **manually labeled** with the same marker names (e.g. in Vicon Nexus). Example: reference subject **BBpilot01** — manually labeled static `BBpilot01 Cal 01.c3d`, manually labeled dynamic `BBpilot01 Trial 10.c3d`. (For the **subject you want to label**, e.g. BBA01, you use that subject’s labeled static and unlabeled dynamic with the main `marker-label` pipeline; the analyze tool is for a separate, reference subject.)
+**Input files:** You must provide the **paths** to two C3D files from one **reference subject**, both **manually labeled** with the same marker names (e.g. in Vicon Nexus). Example: reference subject **REF01** — manually labeled static `REF01 Cal 01.c3d`, manually labeled dynamic `REF01 Trial 10.c3d`. (For the **subject you want to label**, e.g. SUBJ01, you use that subject’s labeled static and unlabeled dynamic with the main `marker-label` pipeline; the analyze tool is for a separate, reference subject.)
 
 ```bash
-# Example: analyze reference subject BBpilot01 (manually labeled static + dynamic)
-marker-label-analyze "path/to/BBpilot01 Cal 01.c3d" "path/to/BBpilot01 Trial 10.c3d"
-marker-label-analyze "path/to/BBpilot01 Cal 01.c3d" "path/to/BBpilot01 Trial 10.c3d" --sample 10 -o report.json
+# Example: analyze reference subject REF01 (manually labeled static + dynamic)
+marker-label-analyze "path/to/REF01 Cal 01.c3d" "path/to/REF01 Trial 10.c3d"
+marker-label-analyze "path/to/REF01 Cal 01.c3d" "path/to/REF01 Trial 10.c3d" --sample 10 -o report.json
 ```
 
 Options: `--sample N` (analyze every Nth frame; default 1), `--pelvis-frame` (build template in pelvis frame), `--static-unit {mm,m}`, `--dynamic-unit {mm,m}` (default mm; use m if file is in meters), `-o report.json` (write full result as JSON).
@@ -205,8 +205,8 @@ Convert a raw or labeled `.c3d` to the same flat layout the pipeline uses (`fram
 
 ```bash
 PYTHONPATH=src python scripts/c3d_to_csv_column_indices.py \
-  "data/BBA01/BBA01 Trial 05.c3d" \
-  -o "data/BBA01/BBA01 Trial 05.csv"
+  "data/SUBJ01/SUBJ01 Trial 05.c3d" \
+  -o "data/SUBJ01/SUBJ01 Trial 05.csv"
 ```
 
 Options: `-o` output path (default: input with `.csv`), `--scale 1000` (m → mm), `--numeric-labels` (force index-only column names), `--zero-based` (numeric fallback names 0, 1, …). The script prints a 0-based C3D index → label map to stderr.
@@ -240,6 +240,8 @@ Labeled or gap-filled marker CSVs (`frame`, `{marker}_x/y/z`, mm, 100 Hz) feed e
 | [gait-spatiotemporal](https://github.com/gait-spatiotemporal/gait-spatiotemporal) | IC/TO detection, strides, `per_stride_data.csv`, `per_step_data.csv` |
 | [gait-mos-kinematics](https://github.com/gait-mos-kinematics/gait-mos-kinematics) | Kinematics ensemble + **joint peak CSVs** (`batch-kinematics-peaks`, `batch-kinematics-ensemble` with spike filtering) |
 | [gait-events-vlm](https://github.com/gait-events-vlm/gait-events-vlm) | VLM-based IC/TO from foot Z plots (experimental / QC) |
+
+Each sibling repo README documents its stage of this pipeline (CLI, inputs/outputs, and cross-links back here).
 
 In-repo **`gait_analysis/`** runs kinematics ensemble and MoS (discrete + time-series + QC plots). See [gait_analysis/README.md](gait_analysis/README.md). It does **not** export peak CSVs; use **gait-mos-kinematics** for `kinematics_all_strides.csv` and `peaks_per_stride.csv`.
 
@@ -324,7 +326,7 @@ batch-kinematics-ensemble \
 ### QC scripts
 
 - IC/TO on foot-Z traces: `scripts/plot_spatiotemporal_events_batch.py` (uses gait-spatiotemporal + gait-events-vlm).
-- Extra cohort example plots: `output/gait_mos_kinematics_extra/event_plots/`.
+- Extra cohort example plots: `output/gait_mos_kinematics_extra/event_plots/<subject>_<board>_<time>/`.
 
 ## License
 
