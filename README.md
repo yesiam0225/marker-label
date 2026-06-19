@@ -339,4 +339,4 @@ batch-kinematics-ensemble \
 
 ## License
 
-See repository.
+MIT — see [LICENSE](LICENSE).
