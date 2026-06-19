@@ -1,6 +1,10 @@
 # marker-label
 
-Label marker sets in motion capture C3D files using subject-specific static trials. No learned model by default; obstacle markers are detected by stationarity, body markers by template matching and temporal propagation.
+## Overview / Highlights
+
+**Problem:** Full-body obstacle-crossing trials arrive as unlabeled dynamic C3D with dozens of anonymous marker columns—manual labeling per trial does not scale, and obstacle markers must be separated from body markers before matching.
+
+**Highlights:** Rule-based labeling from each subject’s **static template** (no learned model): **stationary obstacle pair** detection, middle-frame template match, then **bidirectional temporal propagation** with distance gates and optional reference-guided search. **Static-aware gap filling** (spline/rigid phases, foot/heel synthesis) produces analysis-ready CSVs; a **3D QC viewer** supports frame-by-frame review.
 
 ## Features
 
