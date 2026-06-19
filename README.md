@@ -155,6 +155,12 @@ Tests: `pytest tests/test_gap_filling_phases.py -v`
 
 View labeled C3D or CSV in 3D with **body segments** (sticks between markers) and playback. Segments are defined in `marker_label.segments.SEGMENTS` (Vicon-style: head, thorax, pelvis, arms, legs). Requires `[qc]`: `pip install -e ".[qc]"`.
 
+![3D QC viewer playback (demo)](docs/assets/qc_viewer_demo.gif)
+
+*Pre-IRB feasibility demo clip (marker-label-view styling); consented colleague volunteer — not study participants. Anatomical labels only; no trial filenames or participant identifiers in the asset.*
+
+Regenerate: `PYTHONPATH=src python examples/generate_demo_assets.py` (see [examples/README.md](examples/README.md)).
+
 ```bash
 marker-label-view path/to/trial_01_labeled.c3d
 # or

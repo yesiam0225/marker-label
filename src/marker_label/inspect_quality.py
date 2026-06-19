@@ -7,7 +7,6 @@ Computes visibility, velocity continuity, and obstacle stationarity.
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 
 import numpy as np
 
@@ -16,61 +15,20 @@ def load_labeled_csv(path: str) -> tuple[np.ndarray, list[str], float]:
     """
     Load a labeled CSV (frame, time, marker_x, marker_y, marker_z per marker).
 
+    Also supports C3D-style exports (marker name row + Frame/Sub Frame/X/Y/Z header).
+
     Returns
     -------
     points : (n_frames, n_markers, 3), NaN where missing
     labels : list of marker names
     rate : point frame rate (Hz), or 0 if unknown
     """
-    with open(path, newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        rows = list(reader)
-    # Header: frame, time, then {label}_x, {label}_y, {label}_z for each marker
-    n_frames = len(rows)
-    if n_frames == 0:
-        return np.empty((0, 0, 3)), [], 0.0
-    # Parse marker columns: groups of 3 ending with _x, _y, _z
-    i = 2  # skip frame, time
-    labels = []
-    while i + 2 < len(header):
-        xcol = header[i].strip()
-        ycol = header[i + 1].strip()
-        zcol = header[i + 2].strip()
-        if not (xcol.endswith("_x") and ycol.endswith("_y") and zcol.endswith("_z")):
-            break
-        name = xcol[:-2].strip()  # remove _x
-        labels.append(name)
-        i += 3
-    n_markers = len(labels)
-    points = np.full((n_frames, n_markers, 3), np.nan)
-    rate = 0.0
-    for r, row in enumerate(rows):
-        for m in range(n_markers):
-            ix, iy, iz = 2 + m * 3, 2 + m * 3 + 1, 2 + m * 3 + 2
-            if ix < len(row) and row[ix].strip():
-                try:
-                    points[r, m, 0] = float(row[ix])
-                except ValueError:
-                    pass
-            if iy < len(row) and row[iy].strip():
-                try:
-                    points[r, m, 1] = float(row[iy])
-                except ValueError:
-                    pass
-            if iz < len(row) and row[iz].strip():
-                try:
-                    points[r, m, 2] = float(row[iz])
-                except ValueError:
-                    pass
-    if n_frames > 1:
-        try:
-            t0, t1 = float(rows[0][1]), float(rows[1][1])
-            dt = t1 - t0
-            if dt > 0:
-                rate = 1.0 / dt
-        except (ValueError, TypeError, IndexError):
-            pass
+    from .trial_trim import parse_labeled_csv
+
+    _, meta = parse_labeled_csv(path)
+    points = np.asarray(meta["points"], dtype=np.float64)
+    labels = [str(s) for s in meta["all_stems"]]
+    rate = float(meta.get("rate") or 0.0)
     return points, labels, rate
 
 

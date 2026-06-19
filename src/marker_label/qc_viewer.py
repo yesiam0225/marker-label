@@ -15,17 +15,26 @@ except ImportError as e:
     raise ImportError('Install PyVista: pip install "marker-label[qc]" or pip install pyvista') from e
 
 
-def _frame_points_y_clipped(
+def _frame_points_clipped(
     pts_f: np.ndarray,
-    y_min_mm: float | None,
-    y_max_mm: float | None,
+    x_min_mm: float | None = None,
+    x_max_mm: float | None = None,
+    y_min_mm: float | None = None,
+    y_max_mm: float | None = None,
 ) -> np.ndarray:
     """
-    Return a copy of one frame (n_markers, 3) with markers outside the lab-Y band set to NaN.
+    Return a copy of one frame (n_markers, 3) with out-of-range markers set to NaN.
 
-    Used so spheres and segment sticks omit out-of-range markers without shifting indices.
+    X max hides markers with lab X >= ``x_max_mm`` (e.g. 540 drops obstacles at +X).
+    Y max hides markers with lab Y > ``y_max_mm`` (viewer default band).
     """
     p = pts_f.copy()
+    if x_min_mm is not None:
+        bad = np.isfinite(p[:, 0]) & (p[:, 0] < float(x_min_mm))
+        p[bad] = np.nan
+    if x_max_mm is not None:
+        bad = np.isfinite(p[:, 0]) & (p[:, 0] >= float(x_max_mm))
+        p[bad] = np.nan
     if y_min_mm is not None:
         bad = np.isfinite(p[:, 1]) & (p[:, 1] < float(y_min_mm))
         p[bad] = np.nan
@@ -33,6 +42,15 @@ def _frame_points_y_clipped(
         bad = np.isfinite(p[:, 1]) & (p[:, 1] > float(y_max_mm))
         p[bad] = np.nan
     return p
+
+
+def _frame_points_y_clipped(
+    pts_f: np.ndarray,
+    y_min_mm: float | None,
+    y_max_mm: float | None,
+) -> np.ndarray:
+    """Backward-compatible Y-only clip helper."""
+    return _frame_points_clipped(pts_f, y_min_mm=y_min_mm, y_max_mm=y_max_mm)
 
 
 def _finite_rows(pts: np.ndarray) -> np.ndarray:
@@ -59,6 +77,42 @@ def _repo_search_roots() -> list[Path]:
     return roots
 
 
+def _path_typo_variants(p: Path) -> list[Path]:
+    """Common path typos when invoking marker-label-view from the shell."""
+    s = p.as_posix()
+    pairs = [
+        ("correc/", "corrected/"),
+        ("gao_filled", "gap_filled"),
+    ]
+    variants: list[Path] = []
+    # Apply each substitution independently and cumulatively (all pairs).
+    for old, new in pairs:
+        if old in s:
+            variants.append(Path(s.replace(old, new)))
+    cum = s
+    for old, new in pairs:
+        cum = cum.replace(old, new)
+    if cum != s:
+        variants.append(Path(cum))
+    return variants
+
+
+def _basename_search_candidates(p: Path, repo: Path) -> list[Path]:
+    """If the basename is unique under data/ or corrected/, return that file."""
+    name = p.name
+    if not name:
+        return []
+    hits: list[Path] = []
+    for root_name in ("data", "corrected"):
+        root = repo / root_name
+        if not root.is_dir():
+            continue
+        for hit in root.rglob(name):
+            if hit.is_file():
+                hits.append(hit)
+    return hits
+
+
 def resolve_input_path(path: str | Path) -> Path:
     """
     Resolve a viewer input path.
@@ -71,6 +125,11 @@ def resolve_input_path(path: str | Path) -> Path:
     if p.is_file():
         return p.resolve()
 
+    def _try_resolve(candidate: Path) -> Path | None:
+        if candidate.is_file():
+            return candidate.resolve()
+        return None
+
     candidates: list[Path] = []
     if p.is_absolute():
         candidates.append(p)
@@ -81,21 +140,47 @@ def resolve_input_path(path: str | Path) -> Path:
             if repo is not None:
                 candidates.append(repo / p)
 
+    typo_paths = _path_typo_variants(p)
+    for typo in typo_paths:
+        candidates.append(Path.cwd() / typo)
+        for start in _repo_search_roots():
+            repo = _find_repo_root(start)
+            if repo is not None:
+                candidates.append(repo / typo)
+
     seen: set[Path] = set()
     for candidate in candidates:
         key = candidate.resolve() if candidate.exists() else candidate
         if key in seen:
             continue
         seen.add(key)
-        if candidate.is_file():
-            return candidate.resolve()
+        resolved = _try_resolve(candidate)
+        if resolved is not None:
+            return resolved
 
     hint = f"  cwd: {Path.cwd()}"
+    suggestion: Path | None = None
     for start in _repo_search_roots():
         repo = _find_repo_root(start)
-        if repo is not None and not p.is_absolute():
-            hint += f"\n  repo root: {repo}\n  expected: {repo / p}"
-            break
+        if repo is None or p.is_absolute():
+            continue
+        hint += f"\n  repo root: {repo}\n  expected: {repo / p}"
+        for typo in typo_paths:
+            typo_full = repo / typo
+            hint += f"\n  try instead: {typo_full}"
+            resolved = _try_resolve(typo_full)
+            if resolved is not None:
+                suggestion = resolved
+        if suggestion is None:
+            basename_hits = _basename_search_candidates(p, repo)
+            if len(basename_hits) == 1:
+                suggestion = basename_hits[0]
+                hint += f"\n  try instead: {suggestion}"
+        break
+
+    if suggestion is not None:
+        return suggestion
+
     raise FileNotFoundError(f"File not found: {path}\n{hint}")
 
 
@@ -116,6 +201,92 @@ def load_data(path: str, scale_factor: float = 1.0) -> tuple[np.ndarray, list[st
     raise ValueError(f"Unsupported format: {suffix}. Use .c3d or .csv.")
 
 
+def export_qc_viewer_gif(
+    path: str,
+    out_gif: str | Path,
+    *,
+    title: str = "Demo labeled trial",
+    fps: int = 15,
+    frame_start: int = 0,
+    frame_end: int | None = None,
+    duration_s: float | None = None,
+    realtime: bool = True,
+    playback_speed: float = 1.0,
+    hide_obstacles: bool = False,
+    window_size: tuple[int, int] = (960, 720),
+    point_size: float = 12.0,
+    background: str = "white",
+    segment_color: str = "darkblue",
+    scale_factor: float = 1.0,
+    label_font_size: float = 21.0,
+    y_clip_min_mm: float | None = -1000.0,
+    y_clip_max_mm: float | None = 1200.0,
+    x_clip_min_mm: float | None = None,
+    x_clip_max_mm: float | None = None,
+) -> None:
+    """
+    Render an animated GIF using the same scene styling as ``marker-label-view``.
+
+    Defaults match the ``marker-label-view`` CLI (font size 21, Y clip -1000/1200 mm).
+    With ``duration_s`` and ``realtime=True``, GIF playback length matches wall-clock motion
+    (e.g. 3 s of walking at ``fps`` frames per second).
+    """
+    run_viewer(
+        path,
+        point_size=point_size,
+        background=background,
+        segment_color=segment_color,
+        scale_factor=scale_factor,
+        label_font_size=label_font_size,
+        y_clip_min_mm=y_clip_min_mm,
+        y_clip_max_mm=y_clip_max_mm,
+        x_clip_min_mm=x_clip_min_mm,
+        x_clip_max_mm=x_clip_max_mm,
+        window_title=title,
+        hide_obstacle_markers=hide_obstacles,
+        export_gif=str(out_gif),
+        export_gif_fps=fps,
+        export_gif_playback_speed=playback_speed,
+        export_gif_frame_start=frame_start,
+        export_gif_frame_end=frame_end,
+        export_gif_duration_s=duration_s,
+        export_gif_realtime=realtime,
+        export_gif_window_size=window_size,
+    )
+
+
+def _gif_export_frame_indices(
+    n_frames: int,
+    rate: float,
+    frame_start: int,
+    frame_end: int | None,
+    duration_s: float | None,
+    fps: int,
+    realtime: bool,
+) -> list[int]:
+    """Data frame indices to write; subsample when ``realtime`` keeps GIF length = motion duration."""
+    start = max(0, min(n_frames - 1, frame_start))
+    if duration_s is not None and rate > 0:
+        end = min(n_frames, start + max(1, int(round(duration_s * rate))))
+    elif frame_end is not None:
+        end = min(n_frames, frame_end)
+    else:
+        end = n_frames
+    end = max(start + 1, end)
+    data_indices = list(range(start, end))
+    if not realtime or fps <= 0 or rate <= 0:
+        return data_indices
+    motion_s = (end - start) / rate
+    n_gif = max(1, int(round(motion_s * fps)))
+    if n_gif >= len(data_indices):
+        return data_indices
+    n_data = len(data_indices)
+    return [
+        data_indices[int(round(i * (n_data - 1) / max(1, n_gif - 1)))]
+        for i in range(n_gif)
+    ]
+
+
 def run_viewer(
     path: str,
     *,
@@ -127,6 +298,18 @@ def run_viewer(
     label_font_size: float = 18.0,
     y_clip_min_mm: float | None = None,
     y_clip_max_mm: float | None = None,
+    x_clip_min_mm: float | None = None,
+    x_clip_max_mm: float | None = None,
+    window_title: str | None = None,
+    hide_obstacle_markers: bool = False,
+    export_gif: str | None = None,
+    export_gif_fps: int = 15,
+    export_gif_playback_speed: float = 1.0,
+    export_gif_frame_start: int = 0,
+    export_gif_frame_end: int | None = None,
+    export_gif_duration_s: float | None = None,
+    export_gif_realtime: bool = True,
+    export_gif_window_size: tuple[int, int] = (1200, 900),
 ) -> None:
     """
     Open PyVista window: 3D markers and body segments (sticks), play/stop/back/forward.
@@ -148,6 +331,8 @@ def run_viewer(
     y_clip_min_mm : if set, hide markers (and segment endpoints) with lab Y below this (mm, after scale_factor).
     y_clip_max_mm : if set, hide markers with lab Y above this (mm, after scale_factor).
         The CLI defaults to -500 and 1200 mm unless overridden.
+    x_clip_min_mm : if set, hide markers with lab X below this (mm, after scale_factor).
+    x_clip_max_mm : if set, hide markers with lab X >= this (mm). Use 540 to drop +X obstacles.
     """
     from .segments import segment_lines_for_frame_by_segment, SEGMENT_COLORS, SEGMENTS
 
@@ -156,6 +341,12 @@ def run_viewer(
     n_frames, n_markers, _ = points.shape
     if n_frames == 0 or n_markers == 0:
         raise ValueError("No data to display.")
+    if hide_obstacle_markers:
+        stripped_early = [str(lab).strip().upper() for lab in labels]
+        for name in ("OBSTACLE_L", "OBSTACLE_R"):
+            for ix, s in enumerate(stripped_early):
+                if s == name:
+                    points[:, ix, :] = np.nan
     # Optional best-frame file (e.g. written by export_pre_clav_for_viewer)
     best_frame_1based: int | None = None
     bestframe_path = Path(path).with_suffix(Path(path).suffix + ".bestframe")
@@ -164,21 +355,35 @@ def run_viewer(
             best_frame_1based = int(bestframe_path.read_text().strip().split()[0])
         except (ValueError, IndexError, OSError):
             pass
-    use_y_clip = y_clip_min_mm is not None or y_clip_max_mm is not None
-    # Full array for NaN handling when not clipping; Y-clip path uses NaN to drop spheres/segments
+    use_lab_clip = (
+        y_clip_min_mm is not None
+        or y_clip_max_mm is not None
+        or x_clip_min_mm is not None
+        or x_clip_max_mm is not None
+    )
+
+    def _clip_frame(raw: np.ndarray) -> np.ndarray:
+        if use_lab_clip:
+            return _frame_points_clipped(
+                raw,
+                x_min_mm=x_clip_min_mm,
+                x_max_mm=x_clip_max_mm,
+                y_min_mm=y_clip_min_mm,
+                y_max_mm=y_clip_max_mm,
+            )
+        return raw
+
+    # Full array for NaN handling when not clipping; clip path uses NaN to drop spheres/segments
     pts_display = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
 
     def frame_for_segments(f: int) -> np.ndarray:
-        raw = points[f]
-        if use_y_clip:
-            return _frame_points_y_clipped(raw, y_clip_min_mm, y_clip_max_mm)
-        return raw
+        return _clip_frame(points[f])
 
     def frame_for_cloud(f: int) -> tuple[np.ndarray, np.ndarray]:
         """Return (positions (n,3), valid scalar (n,)) for marker cloud."""
         raw = points[f]
-        if use_y_clip:
-            clipped = _frame_points_y_clipped(raw, y_clip_min_mm, y_clip_max_mm)
+        if use_lab_clip:
+            clipped = _clip_frame(raw)
             vis = _finite_rows(raw) & _finite_rows(clipped)
             pos = np.where(vis[:, np.newaxis], np.nan_to_num(clipped, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
             return pos, vis.astype(np.float32)
@@ -195,7 +400,16 @@ def run_viewer(
     first_pos, first_valid = frame_for_cloud(0)
     cloud = pv.PolyData(first_pos)
     cloud["valid"] = first_valid
-    plotter = pv.Plotter(title=str(Path(path).name))
+    export_mode = export_gif is not None
+    plotter_title = window_title if window_title is not None else str(Path(path).name)
+    if export_mode:
+        plotter = pv.Plotter(
+            title=plotter_title,
+            off_screen=True,
+            window_size=export_gif_window_size,
+        )
+    else:
+        plotter = pv.Plotter(title=plotter_title)
     plotter.set_background(background)
     plotter.add_mesh(
         cloud,
@@ -208,6 +422,8 @@ def run_viewer(
     # Segment lines per segment (different color per segment)
     def add_segment_meshes(pts: np.ndarray) -> None:
         for seg_name, line_pts, line_cells in segment_lines_for_frame_by_segment(pts, labels):
+            if hide_obstacle_markers and seg_name == "Obstacle_Bar":
+                continue
             if line_pts.size == 0:
                 continue
             color = SEGMENT_COLORS.get(seg_name, segment_color)
@@ -321,8 +537,8 @@ def run_viewer(
         leg_foot12_text_color, leg_foot12_shape_color = "lightgreen", "dimgrey"
 
     def _label_frame_points(f: int) -> np.ndarray:
-        if use_y_clip:
-            return _frame_points_y_clipped(points[f], y_clip_min_mm, y_clip_max_mm)
+        if use_lab_clip:
+            return _clip_frame(points[f])
         return pts_display[f]
 
     def _finite_label_cloud(pts_block: np.ndarray, names_seq: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -334,6 +550,8 @@ def run_viewer(
         return pts_block[m], names_arr[m]
 
     def add_obstacle_labels(f: int) -> None:
+        if hide_obstacle_markers:
+            return
         try:
             plotter.remove_actor("obstacle_labels")
         except Exception:
@@ -539,8 +757,12 @@ def run_viewer(
         base = f"Frame {f} / {n_frames}  (rate: {rate:.1f} Hz)"
         if best_frame_1based is not None:
             base += f"  Best frame: {best_frame_1based}"
-        if use_y_clip:
+        if use_lab_clip:
             parts: list[str] = []
+            if x_clip_min_mm is not None:
+                parts.append(f"X≥{x_clip_min_mm:g} mm")
+            if x_clip_max_mm is not None:
+                parts.append(f"X<{x_clip_max_mm:g} mm")
             if y_clip_min_mm is not None:
                 parts.append(f"Y≥{y_clip_min_mm:g} mm")
             if y_clip_max_mm is not None:
@@ -557,6 +779,8 @@ def run_viewer(
     add_leg_foot12_labels(0)
     add_other_labels(0)
     plotter.add_text(frame_text_str(0), font_size=12, name="frame_text")
+    if export_mode:
+        plotter.reset_camera()
 
     # Shared state: current frame index, playing flag, optional slider widget
     frame_idx = [0]
@@ -586,7 +810,8 @@ def run_viewer(
                 slider_widget[0].GetRepresentation().SetValue(f)
             except Exception:
                 pass
-        plotter.update()
+        if not export_mode:
+            plotter.update()
 
     def on_timer(_step: int) -> None:
         if not playing[0]:
@@ -622,6 +847,26 @@ def run_viewer(
     def zoom_out() -> None:
         plotter.zoom_camera(1.0 / _ZOOM_FACTOR)
         plotter.update()
+
+    if export_mode:
+        gif_frames = _gif_export_frame_indices(
+            n_frames,
+            rate,
+            export_gif_frame_start,
+            export_gif_frame_end,
+            export_gif_duration_s,
+            export_gif_fps,
+            export_gif_realtime,
+        )
+        out_path = Path(export_gif)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        gif_fps = max(1, int(round(export_gif_fps * max(0.05, export_gif_playback_speed))))
+        plotter.open_gif(str(out_path), fps=gif_fps)
+        for f in gif_frames:
+            set_frame(f)
+            plotter.write_frame()
+        plotter.close()
+        return
 
     # Frame slider (top): scrub through frames
     rng = (0, max(0, n_frames - 1))
@@ -863,6 +1108,20 @@ def main() -> None:
         metavar="MM",
         help="Hide markers with lab Y above this (mm, after --scale; default 1200).",
     )
+    parser.add_argument(
+        "--x-clip-min",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Hide markers with lab X below this (mm, after --scale).",
+    )
+    parser.add_argument(
+        "--x-clip-max",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Hide markers with lab X >= this (mm). E.g. 540 drops +X obstacles.",
+    )
     args = parser.parse_args()
     run_viewer(
         args.file,
@@ -874,6 +1133,8 @@ def main() -> None:
         label_font_size=args.font_size,
         y_clip_min_mm=args.y_clip_min,
         y_clip_max_mm=args.y_clip_max,
+        x_clip_min_mm=args.x_clip_min,
+        x_clip_max_mm=args.x_clip_max,
     )
 
 

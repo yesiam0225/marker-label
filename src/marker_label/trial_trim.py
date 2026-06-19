@@ -180,6 +180,135 @@ def _read_first_line_raw(fp: io.TextIOWrapper) -> str:
     return line if line.endswith("\n") else line + "\n"
 
 
+def _normalize_c3d_export_marker_name(raw: str, fallback_index: int) -> str:
+    """Strip subject prefix (``DEMO:LFHD``) and map obstacle aliases for the viewer."""
+    s = str(raw).strip()
+    if not s:
+        return f"Point_{fallback_index}"
+    if ":" in s:
+        s = s.split(":", 1)[1].strip()
+    upper = s.upper()
+    if upper == "OBS1":
+        return "OBSTACLE_L"
+    if upper == "OBS2":
+        return "OBSTACLE_R"
+    return s
+
+
+def _parse_c3d_export_csv(
+    path: Path,
+    marker_line: str,
+    column_line: str,
+    rest: str,
+) -> tuple[list[str], dict[str, Any]]:
+    """
+    Parse C3D-style CSV export: marker names row, then ``Frame``, ``Sub Frame``, ``X/Y/Z``…
+    """
+    row0 = next(csv.reader(io.StringIO(marker_line)))
+    row1 = next(csv.reader(io.StringIO(column_line)))
+    if len(row1) < 4:
+        raise ValueError(f"C3D export header too short: {path}")
+
+    x_indices = [i for i, c in enumerate(row1) if str(c).strip().upper() == "X"]
+    if not x_indices:
+        raise ValueError(f"No X columns in C3D export header: {path}")
+
+    all_stems: list[str] = []
+    stem_to_triplet: dict[str, tuple[int, int, int]] = {}
+    for mi, xi in enumerate(x_indices):
+        if xi + 2 >= len(row1):
+            raise ValueError(f"Incomplete X/Y/Z triplet at column {xi} in {path}")
+        raw_name = row0[xi].strip() if xi < len(row0) else ""
+        stem = _normalize_c3d_export_marker_name(raw_name, mi)
+        if stem in stem_to_triplet:
+            stem = f"{stem}_{mi}"
+        stem_to_triplet[stem] = (xi, xi + 1, xi + 2)
+        all_stems.append(stem)
+
+    n_markers = len(all_stems)
+    all_rows = list(csv.reader(io.StringIO(rest)))
+    start = 0
+    if all_rows and any(str(c).strip().lower() == "mm" for c in all_rows[0]):
+        start = 1
+    data_rows = [row for row in all_rows[start:] if any(str(c).strip() for c in row)]
+
+    n_frames = len(data_rows)
+    frames = np.empty(n_frames, dtype=np.int64)
+    times = np.empty(n_frames, dtype=np.float64)
+    points = np.full((n_frames, n_markers, 3), np.nan)
+
+    for r, row in enumerate(data_rows):
+        if len(row) < 2:
+            raise ValueError(f"Row {r}: expected frame, sub frame, ...")
+        try:
+            frames[r] = int(float(row[0].strip()))
+        except ValueError as e:
+            raise ValueError(f"Row {r}: invalid frame value {row[0]!r}") from e
+        try:
+            times[r] = float(row[1].strip()) if row[1].strip() else np.nan
+        except ValueError:
+            times[r] = np.nan
+        for m, stem in enumerate(all_stems):
+            ix, iy, iz = stem_to_triplet[stem]
+            for k, j in enumerate((ix, iy, iz)):
+                if j < len(row) and row[j].strip():
+                    try:
+                        points[r, m, k] = float(row[j])
+                    except ValueError:
+                        pass
+
+    if n_frames > 1:
+        diffs = np.diff(frames)
+        pos = diffs[diffs > 0]
+        if len(pos):
+            median_step = float(np.median(pos))
+            rate = 100.0 if median_step <= 1.0 else 100.0 / median_step
+        else:
+            rate = 100.0
+    else:
+        rate = 0.0
+
+    if n_frames > 0:
+        diffs = np.diff(frames)
+        if not np.all(diffs == 1):
+            raise ValueError(
+                f"Column 'frame' must be strictly increasing contiguous integers; "
+                f"got diffs {np.unique(diffs).tolist()}"
+            )
+
+    ignored_star = [s for s in all_stems if s.strip().startswith("*")]
+    qc_stems_ordered: list[str] = []
+    seen: set[str] = set()
+    for s in all_stems:
+        if s.strip().startswith("*"):
+            continue
+        if s not in seen:
+            seen.add(s)
+            qc_stems_ordered.append(s)
+
+    label_to_marker_idx = {s: mi for mi, s in enumerate(all_stems)}
+    original_header_line = marker_line if marker_line.endswith("\n") else marker_line + "\n"
+    original_header_line += column_line if column_line.endswith("\n") else column_line + "\n"
+
+    metadata: dict[str, Any] = {
+        "path": path,
+        "original_header_line": original_header_line,
+        "all_stems": all_stems,
+        "stem_to_col_triplet": stem_to_triplet,
+        "frames": frames,
+        "times": times,
+        "points": points,
+        "rate": rate,
+        "data_rows": data_rows,
+        "label_to_marker_idx": label_to_marker_idx,
+        "ignored_star_stems": ignored_star,
+        "n_frames": n_frames,
+        "n_markers": n_markers,
+        "csv_format": "c3d_export",
+    }
+    return qc_stems_ordered, metadata
+
+
 def parse_labeled_csv(csv_path: str | Path) -> tuple[list[str], dict[str, Any]]:
     """
     Load a labeled flat CSV: ``frame``, ``time``, then ``marker_x/y/z`` triplets.
@@ -197,11 +326,23 @@ def parse_labeled_csv(csv_path: str | Path) -> tuple[list[str], dict[str, Any]]:
         ``label_to_marker_idx`` (stem -> marker column index), ``ignored_star_stems``.
     """
     path = Path(csv_path)
-    with open(path, newline="") as f:
-        original_header_line = _read_first_line_raw(f)
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        marker_line = _read_first_line_raw(f)
+        column_line = _read_first_line_raw(f)
         rest = f.read()
-    if not original_header_line.strip():
+    if not marker_line.strip():
         raise ValueError(f"Missing header: {path}")
+
+    col_cells = next(csv.reader(io.StringIO(column_line)))
+    if len(col_cells) >= 2:
+        h0 = str(col_cells[0]).strip().lower()
+        h1 = str(col_cells[1]).strip().lower().replace(" ", "")
+        if h0 == "frame" and h1 in ("subframe", "subframe"):
+            return _parse_c3d_export_csv(path, marker_line, column_line, rest)
+
+    # Labeled flat CSV: first line is ``frame, time, marker_x, ...``
+    original_header_line = marker_line
+    rest = column_line + rest
 
     reader = csv.reader(io.StringIO(original_header_line))
     header_cells = next(reader)
