@@ -2,15 +2,55 @@
 
 ## Overview / Highlights
 
-**Problem:** Full-body obstacle-crossing trials arrive as unlabeled dynamic C3D with dozens of anonymous marker columns—manual labeling per trial does not scale, and obstacle markers must be separated from body markers before matching.
+**Problem:** Full-body obstacle-crossing trials arrive as unlabeled dynamic C3D with dozens of anonymous marker columns—manual labeling per trial does not scale. Obstacle markers must be separated from body markers; propagation can still leave **label↔trajectory swaps** on pelvis, head, thorax, and arms; gaps and occlusions block downstream gait analysis.
 
-**Highlights:** Rule-based labeling from each subject’s **static template** (no learned model): **stationary obstacle pair** detection, middle-frame template match, then **bidirectional temporal propagation** with distance gates and optional reference-guided search. **Static-aware gap filling** (spline/rigid phases, foot/heel synthesis) produces analysis-ready CSVs; a **3D QC viewer** supports frame-by-frame review.
+**How we solve it** (rule-based pipeline, no learned model):
+
+| Stage | Challenge | Approach |
+|-------|-----------|----------|
+| **Label** | Unlabeled `Point_*` columns | Subject **static template**; **stationary obstacle pair** detection; middle-frame match + **bidirectional propagation** with distance gates |
+| **Trim** | Long trials, bad windows | Leg-segment **rigid geometry QC** around the best frame → `*_trimmed.csv` |
+| **Relabel** | Swapped / teleported labels on rigid clusters | **Static-reference cluster shapes**; per-frame **Kabsch** pose + **Hungarian** slot assignment; forward/backward merge; optional **rigid fill** → `*_corrected.csv` |
+| **Gap fill** | Short and long occlusions | Spline phases; **two-marker rigid** segments; foot/hand synthesis from **static** geometry |
+| **QC** | Human review at scale | **3D segment viewer** with playback (`marker-label-view`) |
+
+**Highlights:** End-to-end from C3D to analysis-ready CSVs; batch CLIs for trim, relabel, and gap fill; integrates with [gait-spatiotemporal](https://github.com/yesiam0225/gait-spatiotemporal) and [gait-mos-kinematics](https://github.com/yesiam0225/gait-mos-kinematics). Details: [Trial trim and marker relabel](#trial-trim-and-marker-relabel), [Gap filling](#gap-filling).
+
+## Demo — 3D QC viewer
+
+Playback of labeled full-body markers and segment sticks (same styling as `marker-label-view`):
+
+![3D QC viewer playback (demo)](docs/assets/qc_viewer_demo.gif)
+
+*Pre-IRB feasibility demo; consented colleague volunteer — not study participants. Anatomical labels only; no trial filenames or participant identifiers.*
+
+```bash
+pip install -e ".[qc]"
+marker-label-view path/to/trial_labeled.csv
+```
+
+Regenerate GIF: `PYTHONPATH=src python examples/generate_demo_assets.py` ([examples/README.md](examples/README.md)).
+
+### Pipeline (this repo in context)
+
+```text
+marker-label (label → trim → relabel → gap fill)
+    → gait-spatiotemporal (IC/TO, strides)
+    → gait-mos-kinematics (kinematics, MoS)
+```
+
+| Repo | Portfolio visual |
+|------|------------------|
+| **marker-label** (here) | 3D QC viewer GIF (above) |
+| [gait-spatiotemporal](https://github.com/yesiam0225/gait-spatiotemporal) | Foot-Z + detected IC/TO |
+| [gait-mos-kinematics](https://github.com/yesiam0225/gait-mos-kinematics) | Ensemble kinematics plots (in progress) |
 
 ## Features
 
 - **Subject-specific**: Uses each subject's labeled static trial to build a body template.
 - **Obstacle markers**: Detected first. **Default:** `rod_pair` mode (median motion + rod geometry on simultaneous finite frames; min visibility **0.72**; motion cap **5.0** mm/frame unless disabled). Labels **OBSTACLE_L** / **OBSTACLE_R**. Use `--obstacle-mode legacy` for the older “two lowest mean-motion columns” rule.
 - **Body markers**: Template match at a middle high-quality frame, then propagate labels forward and backward.
+- **Trial trim + relabel**: After labeling, trim to a high-quality window and **relabel rigid clusters** (pelvis, head, thorax, arms) using static reference geometry — primary path to `*_corrected.csv`. See [Trial trim and marker relabel](#trial-trim-and-marker-relabel).
 - **Gap filling**: Static-aware fill on corrected labeled CSVs (spline/rigid phases, foot and hand synthesis). See [Gap filling](#gap-filling).
 - **Output**: Both original (NaNs preserved) and filled C3D and CSV (rows = frames, columns = frame, time, `{marker}_x`, `{marker}_y`, `{marker}_z`).
 
@@ -91,6 +131,60 @@ report = run_quality_report("out/trial_01_labeled.csv")
 # report["visibility"], report["velocity_jumps"], report["obstacle_std"], etc.
 ```
 
+### Trial trim and marker relabel
+
+Initial `marker-label` output can still have **label↔trajectory swaps** (especially pelvis, head, thorax, arms) after propagation. The **relabel** step recovers the correct correspondence per frame using **rigid-cluster geometry**, optionally guided by each subject’s **labeled static trial**.
+
+Typical file flow:
+
+```text
+SUBJ01 Trial 05_labeled.csv
+  → marker-label-trial-trim …     → SUBJ01 Trial 05_trimmed.csv (+ *.csv.bestframe)
+  → marker-label-relabel …        → SUBJ01 Trial 05_corrected.csv
+  → marker-label-gap-fill …       → gap-filled CSV for gait analysis
+```
+
+**Trim** (`marker-label-trial-trim`): crop the labeled CSV to a contiguous window around the pipeline best frame using leg-segment geometry QC. Writes `*_trimmed.csv` and a `*.csv.bestframe` sidecar (1-based frame index).
+
+**Relabel** (`marker-label-relabel`, `src/marker_label/relabel_markers.py`): for each rigid cluster (pelvis, head, thorax, left/right arm), solve a per-frame rigid pose and reassign trajectories to marker **slots** — **label-agnostic** (does not trust column IDs). Candidates are in-band labeled points plus unlabeled donor columns (`*` or numeric names). Forward and backward passes are merged; optional spike cleaning on non-rigid markers and cross-cluster mislabel reports.
+
+Static reference (recommended): cluster **shape templates** from the subject static (`--static` or `--static-auto` under `data/{subject_id}/`). Without static, templates are bootstrapped from clean frames in the trial.
+
+**Single trial:**
+
+```bash
+marker-label-trial-trim "out/SUBJ01 Trial 05_labeled.csv" \
+  -o "corrected/SUBJ01 Trial 05_trimmed.csv"
+
+marker-label-relabel "corrected/SUBJ01 Trial 05_trimmed.csv" \
+  --static "data/SUBJ01/SUBJ01 Cal 01.c3d" \
+  --rigidfill
+# default output: corrected/SUBJ01 Trial 05_corrected.csv
+```
+
+Useful flags: `--inlier-tol` (default 35 mm), `--dtol` (default 20 mm template distance tolerance), `--rigidfill` (synthesize missing cluster markers from rigid pose when ≥3 mates are present).
+
+**Outputs** (beside `*_corrected.csv`):
+
+| File | Purpose |
+|------|---------|
+| `*_labelmap.csv` | Per-frame slot assignment log (`cluster`, `slot`, `source`, `rms_mm`) |
+| `*_crosslabel.csv` | Markers sitting at another segment’s slot (when detected) |
+
+**Batch cohort** (manifest `csv_path` per trial; static paths from map or auto-discovery):
+
+```bash
+python scripts/batch_relabel_obs_trials.py "corrected/obs_trials.csv" \
+  --static-map corrected/subject_static_map.csv \
+  --in-place --backup --rigidfill
+```
+
+Generate a static-map template: `--write-static-map corrected/subject_static_map.csv`.
+
+Trim-only batch: `scripts/batch_relabel_trimmed.py` (runs relabel on existing `*_trimmed.csv`).
+
+**Alternate correction:** `marker-label-correct-trimmed` (`trimmed_csv_marker_correction.py`) uses **reference geometry from the original full dynamic trial** (best frame) with envelope filtering, chain swaps, and tier-based rules — complementary to relabel, not a substitute. Most cohort workflows use **relabel** as the primary path to `*_corrected.csv`.
+
 ### Gap filling
 
 Fill gaps in **already labeled, marker-corrected** flat CSVs (`*_corrected.csv`). This is separate from the main `marker-label` labeling pipeline (which can export filled C3D/CSV at label time with a simpler interpolator).
@@ -157,13 +251,7 @@ Tests: `pytest tests/test_gap_filling_phases.py -v`
 
 ### 3D QC viewer
 
-View labeled C3D or CSV in 3D with **body segments** (sticks between markers) and playback. Segments are defined in `marker_label.segments.SEGMENTS` (Vicon-style: head, thorax, pelvis, arms, legs). Requires `[qc]`: `pip install -e ".[qc]"`.
-
-![3D QC viewer playback (demo)](docs/assets/qc_viewer_demo.gif)
-
-*Pre-IRB feasibility demo clip (marker-label-view styling); consented colleague volunteer — not study participants. Anatomical labels only; no trial filenames or participant identifiers in the asset.*
-
-Regenerate: `PYTHONPATH=src python examples/generate_demo_assets.py` (see [examples/README.md](examples/README.md)).
+View labeled C3D or CSV in 3D with **body segments** (sticks between markers) and playback. Segments are defined in `marker_label.segments.SEGMENTS` (Vicon-style: head, thorax, pelvis, arms, legs). Requires `[qc]`: `pip install -e ".[qc]"`. **Demo GIF:** [above](#demo--3d-qc-viewer).
 
 ```bash
 marker-label-view path/to/trial_01_labeled.c3d
@@ -233,6 +321,12 @@ Options: `-o` output path (default: input with `.csv`), `--scale 1000` (m → mm
 8. Build full output: body labels (static order, NaN where missing) + OBSTACLE_L, OBSTACLE_R.
 9. Export original and filled C3D + CSV.
 
+**Post-labeling (recommended for obstacle-crossing cohorts):**
+
+10. **Trial trim** — `marker-label-trial-trim` → `*_trimmed.csv`.
+11. **Marker relabel** — `marker-label-relabel` with subject static → `*_corrected.csv` (see [Trial trim and marker relabel](#trial-trim-and-marker-relabel)).
+12. **Gap fill** — `marker-label-gap-fill` / batch on `*_corrected.csv` (see [Gap filling](#gap-filling)).
+
 For a detailed explanation of the logic and what to check when labeling fails, see [docs/MARKER_LABELING_LOGIC.md](docs/MARKER_LABELING_LOGIC.md).
 
 ## Pelvis markers
@@ -258,10 +352,12 @@ In-repo **`gait_analysis/`** runs kinematics ensemble and MoS (discrete + time-s
 
 Typical order:
 
-1. **Marker CSVs** — `corrected/` or `corrected/gap_filled_full_body/` (paths in obs manifest).
-2. **Spatiotemporal** — `spatiotemporal-gait --trial-manifest … --output-dir gait_spatiotemporal_out/`
-3. **Kinematics + MoS** — `gait_analysis/run_all.py` with matching `--obs-csv`, `--ps-csv`, `--trial-dir`
-4. **Peaks (optional)** — `batch-kinematics-peaks` and `batch-kinematics-ensemble` from gait-mos-kinematics
+1. **Label** — `marker-label` → `*_labeled.csv`
+2. **Trim + relabel** — `marker-label-trial-trim` → `*_trimmed.csv`; `marker-label-relabel` → `*_corrected.csv` (or batch via `scripts/batch_relabel_obs_trials.py`)
+3. **Gap fill** — `marker-label-batch-gap-fill` → `corrected/gap_filled_full_body/` (manifest `obs_trials_gap_filled.csv`)
+4. **Spatiotemporal** — `spatiotemporal-gait --trial-manifest … --output-dir gait_spatiotemporal_out/`
+5. **Kinematics + MoS** — `gait_analysis/run_all.py` with matching `--obs-csv`, `--ps-csv`, `--trial-dir`
+6. **Peaks (optional)** — `batch-kinematics-peaks` and `batch-kinematics-ensemble` from gait-mos-kinematics
 
 Example (main gap-filled cohort):
 
@@ -270,7 +366,7 @@ Example (main gap-filled cohort):
 spatiotemporal-gait \
   --trial-manifest corrected/obs_trials_gap_filled.csv \
   --output-dir gait_spatiotemporal_out \
-  --subject-id PLACEHOLDER --group adult --board RB --time pre
+  --subject-id SUBJ01 --group adult --board RB --time pre
 
 # 2. Kinematics + MoS (from repo root)
 python gait_analysis/run_all.py \
@@ -290,7 +386,7 @@ Additional gap-filled trials live under `corrected/added/extra/` with manifest `
 spatiotemporal-gait \
   --trial-manifest corrected/added/extra_obs_trials.csv \
   --output-dir gait_spatiotemporal_out/extra \
-  --subject-id PLACEHOLDER --group adult --board RB --time pre
+  --subject-id SUBJ01 --group adult --board RB --time pre
 
 # 2. Kinematics + MoS (custom output dir via per-script --output-dir)
 cd gait_analysis/src
@@ -320,6 +416,8 @@ batch-kinematics-ensemble \
 
 | Stage | Typical path | Key files |
 |-------|----------------|-----------|
+| Trim + relabel | `corrected/` | `*_trimmed.csv`, `*_corrected.csv`, `*_labelmap.csv` |
+| Gap fill (main) | `corrected/gap_filled_full_body/` | `*_filled.csv`, manifest `obs_trials_gap_filled.csv` |
 | Spatiotemporal (main) | `gait_spatiotemporal_out/` | `per_stride_data.csv`, `per_step_data.csv` |
 | Spatiotemporal (extra) | `gait_spatiotemporal_out/extra/` | same names |
 | Kinematics + MoS (main) | `output/gait_mos_kinematics/` | `ensemble_curves/`, `mos/`, `mos_timeseries/`, `mos_plots/`, `peaks/` |
