@@ -9,12 +9,12 @@ gait_analysis/
   src/                    # Python modules and CLIs
   data/                   # obs_trials.csv, per_stride_data.csv (symlinks to repo data)
   output/                 # Generated CSVs and plots (gitignored)
-  tests/test_smoke.py     # Single-trial smoke test (SUBJ01 T5)
+  tests/test_smoke.py     # Single-trial smoke test
   run_all.py              # Run all four pipelines in sequence
   requirements.txt
 ```
 
-Trial marker CSVs live in the parent repo at `corrected/` (paths in `obs_trials.csv` use `corrected/SUBJ01 Trial 05_corrected.csv`).
+Trial marker CSVs live in the parent repo at `corrected/` (paths in `obs_trials.csv` point to gap-filled or corrected exports).
 
 ## Setup
 
@@ -56,16 +56,16 @@ Single pipeline (defaults use `./data/` and `./output/`):
 
 ```bash
 cd src
-python batch_kinematics_ensemble.py --filter-trials SUBJ01:5
-python batch_mos.py --filter-trials SUBJ01:5
-python batch_mos_timeseries.py --filter-trials SUBJ01:5
-python visualize_mos.py --filter-trials SUBJ01:5
+python batch_kinematics_ensemble.py --filter-trials PARTICIPANT_A:1
+python batch_mos.py --filter-trials PARTICIPANT_A:1
+python batch_mos_timeseries.py --filter-trials PARTICIPANT_A:1
+python visualize_mos.py --filter-trials PARTICIPANT_A:1
 ```
 
 All four pipelines:
 
 ```bash
-python run_all.py --filter-trials SUBJ01:5
+python run_all.py --filter-trials PARTICIPANT_A:1
 ```
 
 Full dataset (exclude known-bad trials with `--filter-trials` if needed):
@@ -74,7 +74,7 @@ Full dataset (exclude known-bad trials with `--filter-trials` if needed):
 python run_all.py --filter-trials "$(python -c "
 import pandas as pd
 obs = pd.read_csv('data/obs_trials.csv')
-exclude = {('SUBJ02', 57)}  # example: skip unreliable gap fill
+exclude = {('PARTICIPANT_B', 57)}  # example: skip unreliable gap fill
 pairs = [f\"{r.subject_id}:{r.trial}\" for _, r in obs.iterrows()
          if (r.subject_id, int(r.trial)) not in exclude]
 print(','.join(pairs))
@@ -115,12 +115,12 @@ pytest tests/test_smoke.py -v
 ## Verification (example trials)
 
 ```bash
-cd gait_analysis && python run_all.py --filter-trials SUBJ01:5,SUBJ01:23,SUBJ01:33,SUBJ01:48 && echo "SUCCESS"
+cd gait_analysis && python run_all.py --filter-trials PARTICIPANT_A:1,PARTICIPANT_A:23 && echo "SUCCESS"
 ```
 
 ## Known data issues
 
-Some trials may have unreliable gap fill or marker quality. Exclude them with `--filter-trials SUBJ:NN` when running batch jobs.
+Some trials may have unreliable gap fill or marker quality. Exclude them with `--filter-trials PARTICIPANT:NN` when running batch jobs.
 
 ## Extra cohort (added trials)
 

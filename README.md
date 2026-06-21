@@ -67,8 +67,8 @@ Dependencies: `c3d`, `numpy`, `scipy`. For the 3D QC viewer: `pip install -e ".[
 ### CLI
 
 ```bash
-# Example: label SUBJ01 using its static (SUBJ01 Cal 01.c3d) and unlabeled dynamic (SUBJ01 Trial 05.c3d)
-marker-label "path/to/SUBJ01 Cal 01.c3d" "path/to/SUBJ01 Trial 05.c3d" -o out/SUBJ01_trial05
+# Example: label one participant using labeled static + unlabeled dynamic C3D
+marker-label path/to/static_labeled.c3d path/to/dynamic_unlabeled.c3d -o out/trial
 ```
 
 Options:
@@ -138,10 +138,10 @@ Initial `marker-label` output can still have **label↔trajectory swaps** (espec
 Typical file flow:
 
 ```text
-SUBJ01 Trial 05_labeled.csv
-  → marker-label-trial-trim …     → SUBJ01 Trial 05_trimmed.csv (+ *.csv.bestframe)
-  → marker-label-relabel …        → SUBJ01 Trial 05_corrected.csv
-  → marker-label-gap-fill …       → gap-filled CSV for gait analysis
+trial_labeled.csv
+  → marker-label-trial-trim …     → trial_trimmed.csv (+ *.csv.bestframe)
+  → marker-label-relabel …        → trial_corrected.csv
+  → marker-label-gap-fill …       → trial_filled.csv
 ```
 
 **Trim** (`marker-label-trial-trim`): crop the labeled CSV to a contiguous window around the pipeline best frame using leg-segment geometry QC. Writes `*_trimmed.csv` and a `*.csv.bestframe` sidecar (1-based frame index).
@@ -153,13 +153,13 @@ Static reference (recommended): cluster **shape templates** from the subject sta
 **Single trial:**
 
 ```bash
-marker-label-trial-trim "out/SUBJ01 Trial 05_labeled.csv" \
-  -o "corrected/SUBJ01 Trial 05_trimmed.csv"
+marker-label-trial-trim path/to/trial_labeled.csv \
+  -o path/to/trial_trimmed.csv
 
-marker-label-relabel "corrected/SUBJ01 Trial 05_trimmed.csv" \
-  --static "data/SUBJ01/SUBJ01 Cal 01.c3d" \
+marker-label-relabel path/to/trial_trimmed.csv \
+  --static path/to/static_labeled.c3d \
   --rigidfill
-# default output: corrected/SUBJ01 Trial 05_corrected.csv
+# default output: trial_corrected.csv (same folder; *_trimmed → *_corrected)
 ```
 
 Useful flags: `--inlier-tol` (default 35 mm), `--dtol` (default 20 mm template distance tolerance), `--rigidfill` (synthesize missing cluster markers from rigid pose when ≥3 mates are present).
@@ -192,9 +192,9 @@ Fill gaps in **already labeled, marker-corrected** flat CSVs (`*_corrected.csv`)
 **Single trial:**
 
 ```bash
-marker-label-gap-fill "corrected/SUBJ01 Trial 10_corrected.csv" \
-  -o "corrected/added/extra/SUBJ01 Trial 10_filled.csv" \
-  --static-csv "data/SUBJ01/SUBJ01 Cal 01.c3d" \
+marker-label-gap-fill path/to/trial_corrected.csv \
+  -o path/to/trial_filled.csv \
+  --static-csv path/to/static_labeled.c3d \
   --segments-preset full-body
 ```
 
@@ -287,12 +287,11 @@ Options: `--frame N`, `--point-size`, `--background`, `--static-facing`, `--dyna
 
 Analyze a **manually labeled** static + dynamic pair from a reference subject to see how the static template relates to each dynamic frame (per-frame rigid transform, RMS, and which frame is “closest” to the template). Useful to tune pipeline behavior or inspect typical rotation/translation.
 
-**Input files:** You must provide the **paths** to two C3D files from one **reference subject**, both **manually labeled** with the same marker names (e.g. in Vicon Nexus). Example: reference subject **REF01** — manually labeled static `REF01 Cal 01.c3d`, manually labeled dynamic `REF01 Trial 10.c3d`. (For the **subject you want to label**, e.g. SUBJ01, you use that subject’s labeled static and unlabeled dynamic with the main `marker-label` pipeline; the analyze tool is for a separate, reference subject.)
+**Input files:** Paths to two C3D files from one **reference** pair, both **manually labeled** with the same marker names (e.g. in Vicon Nexus). Example: `reference_static.c3d` and `reference_dynamic.c3d`. The analyze tool is for tuning; the main `marker-label` pipeline uses each target participant’s labeled static + unlabeled dynamic.
 
 ```bash
-# Example: analyze reference subject REF01 (manually labeled static + dynamic)
-marker-label-analyze "path/to/REF01 Cal 01.c3d" "path/to/REF01 Trial 10.c3d"
-marker-label-analyze "path/to/REF01 Cal 01.c3d" "path/to/REF01 Trial 10.c3d" --sample 10 -o report.json
+marker-label-analyze path/to/reference_static.c3d path/to/reference_dynamic.c3d
+marker-label-analyze path/to/reference_static.c3d path/to/reference_dynamic.c3d --sample 10 -o report.json
 ```
 
 Options: `--sample N` (analyze every Nth frame; default 1), `--pelvis-frame` (build template in pelvis frame), `--static-unit {mm,m}`, `--dynamic-unit {mm,m}` (default mm; use m if file is in meters), `-o report.json` (write full result as JSON).
@@ -303,8 +302,8 @@ Convert a raw or labeled `.c3d` to the same flat layout the pipeline uses (`fram
 
 ```bash
 PYTHONPATH=src python scripts/c3d_to_csv_column_indices.py \
-  "data/SUBJ01/SUBJ01 Trial 05.c3d" \
-  -o "data/SUBJ01/SUBJ01 Trial 05.csv"
+  path/to/trial.c3d \
+  -o path/to/trial.csv
 ```
 
 Options: `-o` output path (default: input with `.csv`), `--scale 1000` (m → mm), `--numeric-labels` (force index-only column names), `--zero-based` (numeric fallback names 0, 1, …). The script prints a 0-based C3D index → label map to stderr.
@@ -366,7 +365,7 @@ Example (main gap-filled cohort):
 spatiotemporal-gait \
   --trial-manifest corrected/obs_trials_gap_filled.csv \
   --output-dir gait_spatiotemporal_out \
-  --subject-id SUBJ01 --group adult --board RB --time pre
+  --subject-id PARTICIPANT_A --group adult --board RB --time pre
 
 # 2. Kinematics + MoS (from repo root)
 python gait_analysis/run_all.py \
@@ -386,7 +385,7 @@ Additional gap-filled trials live under `corrected/added/extra/` with manifest `
 spatiotemporal-gait \
   --trial-manifest corrected/added/extra_obs_trials.csv \
   --output-dir gait_spatiotemporal_out/extra \
-  --subject-id SUBJ01 --group adult --board RB --time pre
+  --subject-id PARTICIPANT_A --group adult --board RB --time pre
 
 # 2. Kinematics + MoS (custom output dir via per-script --output-dir)
 cd gait_analysis/src
