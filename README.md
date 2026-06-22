@@ -35,14 +35,14 @@ Regenerate GIF: `PYTHONPATH=src python examples/generate_demo_assets.py` ([examp
 
 ```text
 marker-label (label → trim → relabel → gap fill)
-    → gait-spatiotemporal (IC/TO, strides)
+    → gait-spatiotemporal (IC/TO: HS, flat-foot HS, TS; strides)
     → gait-mos-kinematics (kinematics, MoS)
 ```
 
 | Repo | Portfolio visual |
 |------|------------------|
 | **marker-label** (here) | 3D QC viewer GIF (above) |
-| [gait-spatiotemporal](https://github.com/yesiam0225/gait-spatiotemporal) | Foot-Z + detected IC/TO |
+| [gait-spatiotemporal](https://github.com/yesiam0225/gait-spatiotemporal) | Foot-Z + detected IC/TO (HS, TS, flat-foot HS) |
 | [gait-mos-kinematics](https://github.com/yesiam0225/gait-mos-kinematics) | Ensemble kinematics plots (in progress) |
 
 ## Features
